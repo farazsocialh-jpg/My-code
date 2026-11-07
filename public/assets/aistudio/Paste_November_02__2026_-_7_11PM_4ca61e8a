@@ -1,0 +1,547 @@
+SPORTAGE
+OBD Intelligence
+Complete Android product brief, UX blueprint, technical architecture, implementation plan and acceptance criteria
+ 
+Prepared as a hand-off specification for Claude Code / Claude. The intent is that the developer can use this document as the single product brief, inspect the referenced sources, create the project, implement it in stages, and deliver a working Android application.
+Vehicle baseline (verify before vehicle-specific work)
+Target vehicle context supplied by the owner: Kia Sportage, GCC-market, 2.0 MPI petrol AWD, approximately model year 2019. The owner has used an ELM327 adapter and Car Scanner ELM OBD2. Exact model year, ECU identifiers, adapter chipset/firmware and Bluetooth transport must be confirmed in the app onboarding and by a real scan. Do not hard-code unsupported assumptions.
+
+Document version: 1.0  |  Date: 1 November 2026  |  Target: Android 9 (API 28) and newer
+ 
+0. Instructions to Claude — read this first
+Primary instruction
+Treat this document as the product requirements document (PRD), design brief and engineering hand-off. Build a real, installable Android Studio project—not just a mock-up. Work in milestones, compile and test after each milestone, and do not claim hardware functions work until tested against an ELM327 adapter and vehicle or clearly labelled as simulated.
+
+•	Start by inspecting the available repository and development environment. If no project exists, create a new Kotlin Android project. If a repository is supplied later, inspect it before changing files.
+•	Before coding, produce a short implementation plan, identify any conflicting assumptions, and list external credentials needed (for example, Google Maps API key). Do not stop for non-blocking questions; use the safe defaults in this document.
+•	Build the standard OBD2 engine and responsive user interface independently. Keep hardware access behind interfaces so the UI can run in Demo Mode without a connected vehicle.
+•	Use real protocol specifications and verified vehicle/ECU data. Never invent a Kia PID, ECU address, DTC definition, sensor value, or successful test result.
+•	All displayed readings must show units, source, freshness, and whether they are live, calculated, estimated, unavailable, or demo data.
+•	Create a README with setup, build, run, permissions, adapter pairing, troubleshooting, test procedure, and known limitations.
+•	Deliver the complete source project, Gradle wrapper, build instructions, debug APK if the environment permits, and a test report. Do not silently omit incomplete modules.
+Definition of done
+•	Project builds successfully with the documented Gradle/JDK/Android Gradle Plugin versions.
+•	Installs and runs on Android 9+ and adapts to Samsung Galaxy S24 Ultra portrait and landscape layouts.
+•	Demo Mode makes every screen navigable and visually complete without a vehicle.
+•	ELM327 connection, adapter identification, PID discovery, live data, DTC read/clear confirmation and logging work with supported adapters.
+•	Map/Waze hand-off is implemented honestly: Waze is launched externally via supported deep links; no unsupported embedded Waze map is claimed.
+•	Horizontal dashboard pages, page customisation, settings persistence, responsive layouts and safe driving restrictions work.
+•	Automated tests cover protocol parsing, PID calculations, DTC parsing, data freshness, persistence and UI state.
+Product vision
+Create a premium, landscape-first automotive cockpit and OBD2 diagnostic companion for the owner's Kia Sportage, while remaining useful on a Samsung Galaxy S24 Ultra in portrait and landscape. The app combines a live vehicle dashboard, navigation hand-off, multiple horizontally swipeable dashboards, diagnostics, fuel analytics, trips, maintenance and exportable health reports.
+The application is OBD2-first and vehicle-aware—not a claim to replace Kia KDS/GDS dealership diagnostics. Support for manufacturer-specific modules depends on the actual vehicle ECU, adapter, protocol, permissions and verified reverse-engineered information.
+Product principles
+•	Responsive rather than fixed-resolution: adapt to available width, height, orientation, density and window size.
+•	Truthful telemetry: never fabricate values or display stale values as live.
+•	Offline-first: core OBD, dashboard, logs and vehicle history work locally without cloud accounts.
+•	Read-only by default: no arbitrary CAN writes, ECU flashing, immobilizer operations or safety-system actuation.
+•	Safe while moving: large glanceable controls; detailed diagnostics and configuration require parked state.
+•	Modular: generic SAE OBD engine underneath, vehicle profiles and optional Kia-enhanced capability above.
+ 
+1. Target devices, layouts and display behaviour
+1.1 Required device support
+Device class	Expected layout	Requirements
+Samsung Galaxy S24 Ultra	Portrait and landscape; phone width and large phone width	First-class phone UX; no clipped controls; edge-to-edge optional; dynamic type; camera/mic not required.
+Android tablet / aftermarket Android head unit	Landscape, variable 7–13+ inch	Large cockpit, split navigation/telemetry, resizable panels and touch targets.
+Small phone / narrow window	Portrait primarily	Single-column cards, compact charts, accessible navigation; split view becomes stacked.
+Foldable / resizable window	Any available size	Use window size classes and reflow, not device model checks.
+
+Minimum Android version: Android 9 / API 28. Set minSdk 28. Target and compile against a current stable SDK available at build time. Use a compatible stable Kotlin, Compose BOM and Android Gradle Plugin; document exact versions and do not use alpha dependencies for core features.
+1.2 Adaptive layout rules
+Available width (guideline)	Recommended presentation
+Compact: under 600 dp	Phone layout; bottom navigation; stacked cards; portrait-friendly.
+Medium: 600–839 dp	Two-column dashboard where useful; navigation rail or compact bottom bar.
+Expanded: 840 dp and above	Landscape cockpit; persistent side rail or compact top navigation; map/telemetry split.
+Very wide: 1200 dp+	Configurable map/telemetry ratios; max content width; avoid stretching charts.
+
+These are layout breakpoints, not resolution locks. Respect Android window size classes, split-screen resizing, display cut-outs, system bars, font scale and display density. Do not hard-code pixel dimensions or assume the car display has one specific aspect ratio.
+1.3 S24 Ultra acceptance requirements
+•	Portrait: dashboard remains usable with one hand; cards scroll vertically; bottom navigation and status area do not overlap system bars.
+•	Landscape: Drive page becomes a map/telemetry split when the width is expanded; the same content remains accessible.
+•	Text scaling: support Android font scaling without clipped labels or buttons.
+•	Dark and light themes; default dark automotive theme.
+•	Touch controls generally at least 48 dp; driving-critical controls larger.
+•	Do not require an always-on screen; offer optional keep-screen-on while cockpit is active, with user control.
+ 
+Figure 1. Conceptual portrait dashboard for a phone such as the Galaxy S24 Ultra. All values are illustrative placeholders.
+ 
+2. Navigation, map and horizontally swipeable home pages
+2.1 Main Drive page
+ 
+Figure 2. Conceptual landscape Drive page. Map area is a placeholder panel; it is not an embedded Waze screenshot or a live map.
+Default landscape composition: navigation/map panel on the left and vehicle telemetry panel on the right. Default split 60:40, configurable to 70:30, 50:50, 40:60 and reverse. On compact phone widths, reflow into a vertical map card plus telemetry cards rather than forcing a tiny split.
+2.2 Navigation integration — important constraints
+Waze limitation
+Waze does not provide a supported general-purpose embeddable in-app map view for a third-party Compose application. Integrate Waze through supported Waze deep links / intents to search or start navigation, then return to this app. Do not scrape, WebView-wrap, mirror or claim to embed the Waze app.
+
+•	Provide a prominent Open Waze action and destination hand-off using supported Waze URL/deep-link parameters. Handle Waze not installed and unsupported destinations gracefully.
+•	Provide optional in-app map using a supported SDK (Google Maps SDK or another provider) with its own API key, billing, terms and attribution. Map is a separate provider integration, not Waze.
+•	Do not make Google Maps SDK a hard dependency for OBD operation. App must work when map key is absent or network is unavailable.
+•	Explore Android Auto as a separate future integration using approved Android for Cars App Library templates and categories. Android Auto is not an unrestricted screen-mirroring surface; custom Compose horizontal pages cannot simply be projected.
+•	Support external app hand-off and app resume; preserve OBD session state carefully and reconnect if Android suspends the process.
+2.3 Horizontal pages
+ 
+Figure 3. Page family concept. Implement with Compose HorizontalPager or equivalent, with a page indicator and optional page selector.
+Page	Purpose	Core widgets
+1. Drive	Navigation + glanceable telemetry	Map/Waze hand-off, speed, RPM, coolant, voltage, fuel economy, DTC warning.
+2. Cockpit	Instrument-cluster style	Large speed, tachometer, coolant, voltage, throttle/load; configurable gauges.
+3. Engine	Sensor laboratory	STFT/LTFT, O2, MAF/MAP, intake/coolant, ignition timing, supported misfire data; graphs.
+4. Efficiency	Fuel and trip analysis	Average/instant estimates, L/100 km, km/L, trip fuel, idle time, cost.
+5. Diagnostics	Fault and ECU status	DTC list, pending/permanent status, readiness, freeze frame, scan history.
+6. Performance	Driving telemetry	GPS speed, acceleration timers, RPM/speed plot; testing only when safe and stationary/controlled.
+7. Trips	Journey history	Distance, duration, average speed, idle, estimated fuel, route if user enabled.
+8. Maintenance	Ownership hub	Service reminders, maintenance history, battery voltage trends, user notes.
+9. Media (optional)	Convenience panel	External media app launch / basic supported media session controls only if permitted.
+10. Settings	Configuration	Adapter, vehicle profile, units, layout, alerts, privacy, export, diagnostics.
+
+Page management: user can reorder, hide, restore, set startup page, select widgets and choose compact/expanded layouts. Persist settings locally. Swipe gestures must not hijack horizontal chart scrubbing or map gestures; use clear gesture priority and page-edge behaviour. Provide explicit page dots and a page chooser.
+2.4 Fixed status/navigation elements
+•	Connection badge: Disconnected / Connecting / Connected / Reconnecting / Unsupported adapter.
+•	Data freshness marker: Live, last updated time, stale, unavailable or demo.
+•	GPS state, local time and optional trip recording state.
+•	Critical warning indicator only for verified conditions; never infer a fault from a single noisy sample.
+•	Drive page shortcut available from all pages.
+ 
+3. Feature catalogue and scope
+3.1 Core OBD2
+Feature	Details	Release
+Adapter connection	Bluetooth Classic SPP first; BLE transport interface; USB serial optional future. Pairing and connection diagnostics.	V1
+Adapter identification	Send safe AT identification commands; record ELM version/clone warning; identify protocol response. Do not trust adapter-reported version as proof of genuine hardware.	V1
+Protocol discovery	Automatic protocol mode first; optional manual selection; report protocol detected and confidence.	V1
+Supported PID scan	Query supported-PID bitmaps and recursively discover standard supported PIDs; cache by vehicle/ECU identity.	V1
+Live data	RPM, speed, coolant, intake temp, load, throttle, MAP/MAF, fuel trims, O2, timing, fuel pressure where supported.	V1
+DTCs	Read stored, pending and permanent codes; parse multiple ECUs where supported; clear only after warning/confirmation.	V1
+Freeze frame	Read Mode 02 values associated with a stored DTC where supported.	V2
+Readiness	Read Mode 01 PID 01 monitor readiness and supported monitor status; explain incomplete monitors.	V1
+Mode 06	Read and decode monitor test results where definitions are known; display raw IDs if unknown.	V2
+Mode 09	VIN, calibration IDs and CVNs where supported; handle multi-frame responses.	V1
+Logs	Timestamped sensor snapshots, DTC scans, adapter events and export.	V1
+
+3.2 Sensor and engine analysis
+•	Oxygen sensor voltage/current/equivalence ratio based on the exact PID and sensor type; do not assume all O2 sensors are narrowband voltage sensors.
+•	Fuel trims: STFT and LTFT by bank; explain that values vary with load, temperature and closed-loop state.
+•	Catalyst monitor: show readiness and supported Mode 06 results; do not diagnose catalytic converter solely from one graph.
+•	Airflow/load: MAF, MAP, calculated load, throttle and intake air temperature when supported.
+•	Engine temperature: coolant and intake; configurable alert thresholds, with defaults labelled as generic guidance.
+•	Misfire: only if standard or verified Kia-enhanced data is available; no fabricated cylinder counters.
+•	Fuel use: clearly label calculated estimates; standard OBD PIDs may not expose true instantaneous fuel rate on every car. Offer calculation from MAF + fuel assumptions only when assumptions are visible.
+3.3 Fuel, trips and performance
+Feature	Calculation / data policy
+Instant fuel economy	Use a supported fuel-rate PID if present; otherwise calculate only with validated inputs and label as estimate.
+Average fuel economy	Aggregate trip fuel estimate / distance; exclude invalid GPS and stationary samples appropriately.
+Idle fuel estimate	Estimate only if fuel rate is available; otherwise show idle duration, not invented litres.
+Fuel cost	User-configured fuel price and currency (default QAR, editable); display estimate.
+Trip distance	GPS preferred; OBD speed integration optional and clearly identified.
+Acceleration	Use GPS speed samples with timestamp accuracy; no safety-critical claims; warn to test legally and safely.
+Driving score	Transparent rules (smoothness, idle, acceleration); opt-in and not presented as mechanical diagnosis.
+
+3.4 Maintenance and health
+•	Manual service entries: date, odometer, work, cost, notes, attachments optional.
+•	Configurable reminders by date or odometer: oil, filters, spark plugs, coolant, brake fluid, tyres, transmission service.
+•	Battery/charging trend tracking from supported voltage source; adapter voltage is not a complete battery health test.
+•	Vehicle health summary must be explainable and based on explicit evidence; no black-box percentage pretending to measure all vehicle health.
+•	PDF/CSV/JSON export for DTC scan, selected live data and trip summary.
+ 
+4. OBD protocol and ELM327 engineering
+4.1 Standard OBD service modes
+Mode	Meaning	Implementation notes
+01	Current powertrain data	PID discovery, typed decoders, units and support checks.
+02	Freeze-frame data	Frame index and associated DTC; not every ECU supports all PIDs.
+03	Stored DTCs	Parse response bytes; handle multiple codes and no-code response.
+04	Clear/reset emissions DTC information	Explicit confirmation; warn that readiness and freeze-frame data may be reset.
+05	Oxygen sensor monitoring test results	Legacy/vehicle-dependent; use only when ECU supports it.
+06	On-board monitoring test results	Decode only known test IDs/limits; preserve raw data.
+07	Pending DTCs	Separate from stored and permanent codes.
+08	Control of onboard systems	Do not expose generic control in consumer UI; restricted and not part of initial release.
+09	Vehicle information	VIN, calibration IDs, CVNs where supported; multi-frame handling.
+0A	Permanent DTCs	Read-only; permanent DTCs are not cleared by Mode 04.
+
+4.2 ELM327 command lifecycle
+1.	Open transport (Bluetooth SPP RFCOMM or BLE GATT).
+2.	Initialize adapter with documented AT commands: reset, echo off, linefeeds off, spaces on/off consistently, headers configuration as required, protocol auto or selected.
+3.	Read adapter identification; detect timeout, malformed responses and likely clone limitations.
+4.	Send one command at a time through a central serialized command queue. Never run independent polling loops against the same socket.
+5.	Normalize response lines, strip prompts/echo, handle NO DATA, STOPPED, BUS INIT errors, question marks and buffer overflow.
+6.	Parse positive/negative responses, ECU headers, CAN multi-frame/ISO-TP responses and flow control as required.
+7.	Schedule PIDs by priority and rate. Avoid flooding low-cost adapters; make polling intervals configurable and measured.
+8.	On disconnect, stop queue, mark readings stale, close resources and reconnect with bounded backoff.
+4.3 Architecture interfaces
+interface ObdTransport {
+    val connectionState: StateFlow<ConnectionState>
+    suspend fun connect(device: AdapterDevice)
+    suspend fun write(bytes: ByteArray)
+    fun incomingBytes(): Flow<ByteArray>
+    suspend fun disconnect()
+}
+
+interface ObdCommandChannel {
+    suspend fun execute(command: String, timeoutMs: Long): ObdResponse
+}
+
+interface VehicleProfile {
+    val id: String
+    val make: String
+    val model: String
+    val yearRange: IntRange?
+    val market: String?
+    val engineCode: String?
+}
+
+interface PidDecoder<T> {
+    val service: Int
+    val pid: Int
+    fun decode(payload: ByteArray): T
+}
+
+Use these as conceptual contracts; adapt signatures to the chosen codebase. Keep Android Bluetooth APIs in the data/transport layer, not in Compose UI or domain logic.
+4.4 Standard PID examples
+PID	Signal	Typical decoder (verify exact response length)
+010C	Engine RPM	((A*256)+B)/4 rpm
+010D	Vehicle speed	A km/h
+0105	Coolant temperature	A - 40 °C
+010F	Intake air temperature	A - 40 °C
+0104	Calculated engine load	A*100/255 %
+0111	Throttle position	A*100/255 %
+0106	STFT Bank 1	(A-128)*100/128 %
+0107	LTFT Bank 1	(A-128)*100/128 %
+010B	Intake manifold absolute pressure	A kPa
+010A	Fuel pressure	3*A kPa (PID definition applies)
+
+Decoder rule
+Implement decoders from the relevant SAE/ISO standard and test vectors. This table is an illustrative starter list, not a complete PID catalogue. Some PIDs are optional, have different payload lengths or are not supported by the Sportage ECU.
+
+4.5 Polling strategy
+Priority	Examples	Initial policy
+P0 / cockpit	RPM, speed, coolant, voltage if available	Fast enough for a responsive display, but adapter-safe; target ~2–5 updates/sec per critical group, not per PID.
+P1 / engine	Load, throttle, MAP/MAF, fuel trims	~1 update/sec or slower; rotate requests.
+P2 / slow diagnostics	O2, Mode 06, readiness, VIN	On demand or periodic slow refresh; never compete with P0.
+P3 / background	History, maintenance, export	No live OBD polling.
+
+Measure actual command round-trip time. Adapt the polling schedule to adapter performance, number of supported ECUs and transport. Provide a low-bandwidth mode for clone adapters.
+ 
+5. Kia Sportage vehicle-specific profile
+Vehicle-specific data policy
+The initial vehicle profile is a GCC-market Kia Sportage around 2019, 2.0 MPI petrol AWD, but the exact model year, engine code, transmission, market calibration and ECU IDs have not yet been verified. The app must onboard and identify the actual vehicle rather than assume this profile is exact.
+
+5.1 Vehicle onboarding
+9.	Ask user to select make/model/year/market/engine/transmission; allow unknown values.
+10.	Connect adapter and run standard OBD protocol discovery.
+11.	Read VIN and Mode 09 identifiers where supported; user can confirm or redact VIN.
+12.	Capture ECU response headers and calibration IDs only with consent.
+13.	Run supported-PID discovery and store the results as a vehicle capability snapshot.
+14.	Allow owner to attach a diagnostic report (e.g., Car Scanner export) for comparison.
+15.	Keep a distinction between user-entered configuration, ECU-reported data and inferred data.
+5.2 Kia enhanced diagnostics roadmap
+Module	Initial support stance	Requirements to add
+ECM/PCM	Standard OBD powertrain data first	Verified Kia-specific PIDs, ECU address, request/response format and applicability.
+TCM	Do not assume generic ELM support	Vehicle-specific protocol and enhanced diagnostic definitions; safe read-only access.
+ABS/ESC	Capability detection only	Kia-compatible adapter/protocol and validated DTC definitions.
+SRS/Airbag	Capability detection only; read-only if safely validated	Strict safety policy; no clearing or actuation in consumer release.
+AWD coupling/control	Capability detection only	Verified Sportage AWD ECU data and supported diagnostic tool/protocol.
+EPS/BCM/TPMS	Future enhanced support	Exact ECU mapping, data definitions and test vehicles.
+
+Do not invent addresses, PIDs or diagnostic session sequences. Public documentation may not expose proprietary Kia procedures. The app should show 'not supported / not verified' instead of a false green check.
+5.3 DTC knowledge base
+Create a local DTC catalogue with generic SAE code definitions plus optional verified Kia-specific extensions. Fields: code, system, title, plain-language explanation, severity, symptoms, common causes, diagnostic checks, source URL/document, applicability, confidence, last verified date and whether the code is generic or manufacturer-specific.
+For P0420, show catalyst-system efficiency below threshold as a generic description. Offer a structured diagnostic checklist: check exhaust leaks, fuel trims, upstream/downstream sensor behaviour, misfire history and relevant service information. Never conclude the catalytic converter is defective from code alone.
+5.4 Research and source provenance
+Create a /docs/research directory in the project. Keep a source register with title, URL, date accessed, what it supports, vehicle applicability and confidence. Prefer Kia service information/TSBs, SAE/ISO standards, official Android docs, official Waze/Google Maps docs and reputable open-source libraries. Treat forum posts and GitHub reverse-engineering as leads, not proof.
+ 
+6. UX design system and visual assets
+6.1 Visual language
+Token	Default
+Background	Near-black #0B1118
+Surface	Deep blue-charcoal #14212B
+Elevated surface	#1B2A36
+Primary accent	Electric cyan #5CDCF4
+Secondary accent	Teal #52D6B0
+Warning	Amber #F2B95D
+Critical	Red #F06464
+Primary text	#EAF5FA
+Secondary text	#9BB2C0
+Typography	Roboto / system sans; clear numeric tabular figures
+Shape	Rounded cards; restrained borders; avoid excessive glow
+Motion	Short, subtle transitions; disable/reduce with system setting
+
+6.2 Components
+•	GaugeCard: title, numeric value, unit, range, freshness, optional min/max zones.
+•	SensorTile: label, value, unit, source, support status and stale state.
+•	ConnectionPill: adapter state and tap-through diagnostics.
+•	DtcCard: code, status, severity, description, first/last seen and evidence.
+•	ChartPanel: selectable time window, series legend, min/max/average and export.
+•	MapPanel: map SDK or external navigation launch state; must handle no key/offline.
+•	PageIndicator: visible current page and direct page selection.
+•	VehicleProfileCard: make/model/year/engine/market/ECU IDs with provenance.
+•	EmptyState: explain what is missing and how to obtain it; no blank graphs.
+•	DemoBanner: clearly identifies all simulated readings.
+6.3 Accessibility and driving use
+•	Meet Android accessibility semantics; content descriptions for gauges and icons.
+•	Do not use colour alone to convey fault severity; include labels/icons.
+•	High contrast in daylight; dark mode tuned for night driving.
+•	Large glanceable values and limited text on Drive page.
+•	Detailed diagnostic explanations are parked-only by default.
+•	Optional spoken alerts only for important verified conditions; configurable and off by default.
+ 
+7. Android implementation architecture
+7.1 Recommended stack
+Layer	Technology / rule
+Language	Kotlin
+UI	Jetpack Compose + Material 3; responsive adaptive layouts
+Navigation	Navigation Compose; horizontal pager for dashboard pages
+Architecture	Clean Architecture + MVVM; unidirectional state flow
+Async	Kotlin Coroutines + Flow
+DI	Hilt or Koin; prefer Hilt if project already uses it
+Persistence	Room for trips/logs/DTC/service records; DataStore for preferences
+Charts	Vico or custom Canvas; isolate chart library behind UI component
+Bluetooth Classic	Android BluetoothSocket RFCOMM/SPP
+BLE	BluetoothGatt transport, separate from Classic implementation
+Map	Optional Google Maps SDK or another licensed map provider; Waze external deep links
+Export	PdfDocument/Android print APIs or a maintained PDF library; CSV/JSON
+Testing	JUnit, coroutine test, MockK, Compose UI tests, instrumented Bluetooth tests where possible
+
+7.2 Suggested package structure
+com.example.sportageobd/
+  app/
+    MainActivity.kt
+    SportageObdApplication.kt
+    navigation/
+    theme/
+  core/
+    common/
+    model/
+    result/
+    permissions/
+    logging/
+  data/
+    bluetooth/classic/
+    bluetooth/ble/
+    obd/elm/
+    obd/protocol/
+    obd/parser/
+    database/
+    repository/
+    map/
+  domain/
+    model/
+    repository/
+    usecase/
+    diagnostics/
+    analytics/
+  vehicle/
+    profiles/
+    kia/
+    pid/
+    dtc/
+    servicebulletins/
+  feature/
+    onboarding/
+    connection/
+    drive/
+    cockpit/
+    engine/
+    diagnostics/
+    efficiency/
+    performance/
+    trips/
+    maintenance/
+    reports/
+    settings/
+  background/
+    VehicleSessionService.kt
+    TripRecordingWorker.kt
+  testFixtures/
+  docs/
+
+
+7.3 State and data model
+Use typed domain models. Do not pass raw strings through the UI. Represent unavailable, unsupported, stale, invalid and live states explicitly.
+sealed interface ReadingState<out T> {
+    data class Live<T>(
+        val value: T,
+        val unit: String,
+        val timestampMillis: Long,
+        val source: DataSource
+    ) : ReadingState<T>
+    data class Stale<T>(
+        val lastValue: T,
+        val lastUpdatedMillis: Long
+    ) : ReadingState<T>
+    data object Unsupported : ReadingState<Nothing>
+    data object Unavailable : ReadingState<Nothing>
+    data class Error(val reason: String) : ReadingState<Nothing>
+}
+
+enum class DataSource { OBD_STANDARD, KIA_ENHANCED, GPS, USER_INPUT, CALCULATED, DEMO }
+
+data class VehicleSession(
+    val vehicleId: String,
+    val adapterId: String?,
+    val protocol: String?,
+    val connectedAtMillis: Long?,
+    val state: ConnectionState
+)
+
+7.4 Foreground/background behaviour
+Use a foreground service only when an active user-started vehicle session genuinely needs ongoing telemetry while the app is backgrounded. Provide a persistent notification and stop control. Respect Android background execution and Bluetooth restrictions. Do not keep scanning or polling indefinitely after the user disconnects or exits the session.
+ 
+8. Permissions, privacy and security
+Permission / capability	Policy
+BLUETOOTH (legacy)	Declare only where needed for older Android versions; runtime model differs by OS.
+BLUETOOTH_ADMIN (legacy)	Only for legacy scanning/connection behaviour where required.
+BLUETOOTH_CONNECT	Request on Android 12+ when connecting to paired Bluetooth devices.
+BLUETOOTH_SCAN	Only if scanning for adapters; explain purpose. Avoid location inference if not needed.
+ACCESS_FINE_LOCATION	Only if GPS trip recording or map feature requires precise location; ask separately and allow core OBD without it.
+FOREGROUND_SERVICE	Only for user-visible active session; comply with target SDK service type rules.
+INTERNET	Only for map provider, optional updates or user-requested online features; core OBD remains offline.
+
+•	No account required for core app.
+•	Do not upload VIN, GPS routes, DTCs or vehicle logs by default.
+•	Offer export/delete all local data.
+•	Do not put VIN, GPS or diagnostic data in analytics/crash logs.
+•	API keys must be restricted and kept out of public source where possible; explain local build configuration.
+•	Never transmit arbitrary CAN frames from a UI text field in normal release builds.
+•	Do not run actuator tests or clear safety-module faults in the initial release.
+9. Safety and responsible diagnostics
+Safety boundary
+This is a monitoring and diagnostic aid, not a safety-certified instrument cluster. Do not present OBD speed as the vehicle's legally authoritative speedometer. Do not encourage phone interaction while driving. All detailed diagnostics, code clearing, configuration, performance tests and exports should be parked-only or require a deliberate safety gate.
+
+•	Use GPS speed only as a secondary display and label its source; do not replace factory speedometer.
+•	Sensor thresholds must be configurable and sourced; account for operating conditions.
+•	Never state that a component is safe or defective based on one PID.
+•	Before clearing DTCs, explain data/readiness loss and ask for confirmation.
+•	Do not expose Mode 08 control, raw CAN write or proprietary security access in the initial release.
+•	Do not provide ECU flashing, immobilizer, key programming, airbag activation/deactivation or emissions defeat functions.
+ 
+10. Development phases and deliverables
+Milestone	Scope	Deliverable / exit criteria
+M0 — Foundation	Project skeleton, design tokens, navigation, demo data, adaptive layouts	Builds; all pages render in demo mode on phone and landscape emulator.
+M1 — Adapter	Bluetooth Classic SPP connection, permissions, ELM init, command queue, adapter info	Connect/disconnect/reconnect; raw logs; adapter simulator tests.
+M2 — Standard OBD	Protocol detection, PID support scan, live PIDs, DTCs, readiness, VIN	Verified against simulator and physical adapter; no fabricated readings.
+M3 — Dashboard UX	Drive split view, horizontal pages, customization, S24 responsive polish	Page swipes and layouts work at compact/medium/expanded widths.
+M4 — Analytics	Trips, fuel estimates, charts, maintenance and exports	Calculations documented and labelled; local data persists.
+M5 — Navigation	Waze deep links; optional in-app map SDK behind configuration	No unsupported Waze embedding; app functions without map API key.
+M6 — Kia research	Verified vehicle profile, DTC knowledge base, enhanced modules discovery	Only validated data enabled; unsupported modules clearly marked.
+M7 — QA/release	Accessibility, battery/performance, crash testing, APK and docs	Release checklist passed; known limitations documented.
+
+10.1 Build order for Claude
+16.	Inspect repository; confirm JDK, Gradle, Android SDK and build tools.
+17.	Create app skeleton, Compose theme, navigation and demo mode.
+18.	Implement domain models, repository interfaces and Room schema.
+19.	Implement Bluetooth Classic transport and ELM command queue with unit tests.
+20.	Implement standard OBD parser and PID decoder test fixtures.
+21.	Implement live dashboard with a simulated data source, then real adapter repository.
+22.	Implement DTC, freeze frame, readiness, Mode 06 and Mode 09 screens.
+23.	Implement horizontal page system and responsive layouts.
+24.	Implement trip, fuel, maintenance and report features.
+25.	Implement Waze hand-off and optional map provider.
+26.	Run device/emulator matrix, fix bugs, produce APK and hand-off docs.
+ 
+11. Test plan and acceptance criteria
+11.1 Unit tests
+•	ELM response normalisation: echoed command, prompt, CR/LF, NO DATA, STOPPED, ERROR, malformed bytes.
+•	PID decoders: positive test vectors, short payload, extra bytes, invalid values and units.
+•	DTC parsing: stored/pending/permanent, multiple codes, zero codes, malformed response.
+•	ISO-TP multi-frame assembly and flow control if implemented.
+•	Supported-PID bitmap parsing and recursive discovery.
+•	Fuel and trip calculations with zero distance, missing MAF, invalid GPS and stale samples.
+•	Data freshness transitions and reconnect state machine.
+•	Room migrations and export serialization.
+11.2 Integration and device tests
+Test	Pass condition
+No adapter	App opens; all pages work in Demo Mode; clear disconnected state.
+Unsupported adapter	Useful explanation; no crash or endless spinner.
+ELM327 Bluetooth Classic	Pair/connect; initialise; read supported PIDs; disconnect cleanly.
+Adapter clone / slow response	Timeout/retry logic; low-bandwidth mode; no command interleaving.
+Vehicle ignition off	Graceful timeout; no false sensor values.
+Engine running	Live values update; stale state when responses stop.
+S24 Ultra portrait	No clipping/overlap; accessible text; all actions usable.
+S24 Ultra landscape	Adaptive cockpit layout; panels resize and page navigation works.
+Large landscape display	Map/telemetry split; no fixed pixel assumptions.
+Waze installed / absent	Deep link opens Waze or gives fallback instructions.
+No network / no Maps key	OBD and local features still work; map panel explains offline/unconfigured state.
+Process recreation	Saved preferences and records remain; connection recovers safely.
+
+11.3 Performance targets
+•	No UI thread blocking from Bluetooth, database, chart rendering or parsing.
+•	Dashboard remains responsive while telemetry is active.
+•	Bounded log storage with configurable retention; avoid unbounded high-frequency raw data.
+•	Battery use is measured in active and background modes.
+•	Reconnect backoff prevents rapid repeated connection loops.
+•	Charts downsample long histories for rendering without deleting raw stored data.
+12. Data schema — minimum viable
+Entity	Important fields
+Vehicle	id, make, model, year, market, engine, transmission, VIN (optional), createdAt
+Adapter	id, displayName, address/id, transportType, adapterVersion, lastSeen, notes
+EcuIdentity	vehicleId, ecuHeader, protocol, calibrationId, cvn, source, observedAt
+PidCapability	vehicleId, ecuHeader, service, pid, supported, verification, discoveredAt
+SensorSample	sessionId, pidKey, value, unit, timestamp, source, quality
+DtcRecord	vehicleId, code, status, ecuHeader, firstSeen, lastSeen, freezeFrameRef
+Trip	id, vehicleId, start, end, distance, duration, idleDuration, fuelEstimate, routeOptIn
+MaintenanceEntry	id, vehicleId, item, date, odometer, cost, currency, notes
+DashboardPage	id, name, order, visible, widgetLayoutJson, defaultPage
+AppSettings	theme, units, currency, pollingProfile, safetyOptions, mapProvider
+
+Use migrations and stable IDs. Avoid storing every high-rate sample forever; provide session summaries and user-configurable retention. Encrypt particularly sensitive optional data where appropriate; VIN and route history should be treated as personal data.
+ 
+13. Claude hand-off prompt (copy/paste)
+Give Claude this document and the following instruction. Claude should use the whole document as the source of truth and proceed with implementation rather than returning only a plan.
+You are the senior Android engineer responsible for implementing the application described in this specification.
+
+Read the entire document before coding. Treat it as the product requirements document and engineering contract.
+
+Build a complete native Android application in Kotlin with Jetpack Compose, minimum Android 9 (API 28), responsive on Samsung Galaxy S24 Ultra in portrait/landscape and on large landscape Android head units/tablets. Do not hard-code a single screen resolution.
+
+The app must include:
+1. Premium dark automotive UI and Demo Mode.
+2. Horizontally swipeable, reorderable dashboard pages.
+3. Drive page with a map/navigation panel and OBD telemetry panel.
+4. Waze external deep-link hand-off (do not embed or scrape Waze).
+5. Optional in-app map provider behind a configurable API key.
+6. ELM327 Bluetooth Classic SPP first, with transport abstraction for BLE/USB.
+7. Safe ELM initialisation, serialized command scheduler, protocol discovery and PID support scan.
+8. Standard OBD modes 01, 02, 03, 04, 06, 07, 09 and 0A where supported.
+9. Typed sensor states: live, stale, unsupported, unavailable, error and demo.
+10. DTC catalogue, logs, trip/fuel estimates, maintenance and PDF/CSV/JSON exports.
+11. Room persistence, DataStore preferences, MVVM/Clean Architecture, Coroutines/Flow.
+12. Android 9+ Bluetooth permission handling and safe lifecycle/reconnection.
+13. Tests, README, setup instructions and known limitations.
+
+Important constraints:
+- Do not fabricate Kia Sportage PIDs, ECU addresses, DTC details, sensor values or capabilities.
+- Treat the vehicle as a provisional GCC Kia Sportage 2.0 MPI AWD around 2019 until exact year/ECU/adapter are confirmed.
+- Keep standard OBD separate from Kia-enhanced features.
+- Read-only by default. No ECU flashing, immobilizer/key programming, airbag control, emissions defeat or arbitrary CAN write.
+- Do not claim the app replaces Kia KDS/GDS or embeds Waze.
+- Make core OBD functions work offline and without a map API key.
+- Every sample/demo reading must be clearly marked DEMO.
+- Build and test each milestone. Fix compile errors before proceeding.
+
+First inspect the environment/repository and report a concise plan, then implement Milestone 0 and continue through the milestones in this document. Do not stop after generating UI mockups. At completion, provide the source tree, build command, APK path if generated, test results, hardware verification status and a list of anything that genuinely requires a physical vehicle/adapter or API key.
+
+14. Known unknowns to verify during implementation
+Unknown	How to resolve
+Exact Sportage model year/engine code/market	Owner confirms registration/manual/VIN decode; avoid publishing full VIN.
+Exact ELM327 chipset/version/transport	Adapter identification, Android Bluetooth device details and AT test; clone adapters may lie about version.
+Supported OBD protocol	Automatic protocol negotiation and ECU response headers.
+Actual standard PID support	Supported PID bitmap discovery on vehicle.
+Kia enhanced ECU access	Use verified Kia service information and a compatible diagnostic adapter; test on this vehicle.
+Map provider and API key	Owner chooses provider; developer documents key setup and restrictions.
+Android Auto use case	Separate future workstream; check current approved car-app templates and categories.
+
+15. Source register and reference links
+The following official and open-source references are starting points. Claude must re-check current versions, terms and applicability before implementation. Public GitHub repositories are code references, not proof that a feature is safe or compatible with this Sportage.
+•	Android Bluetooth overview: https://developer.android.com/develop/connectivity/bluetooth
+•	Bluetooth permissions: https://developer.android.com/develop/connectivity/bluetooth/bt-permissions
+•	Jetpack Compose adaptive apps: https://developer.android.com/develop/ui/compose/layouts/adaptive
+•	Compose Pager: https://developer.android.com/develop/ui/compose/layouts/pager
+•	Android for Cars App Library: https://developer.android.com/training/cars/apps
+•	Waze Deep Links: https://developers.google.com/waze/deeplinks
+•	Google Maps SDK for Android: https://developers.google.com/maps/documentation/android-sdk
+•	ELM Electronics ELM327 documentation: https://www.elmelectronics.com/wp-content/uploads/2016/07/ELM327DS.pdf
+•	OBD Scanner Android reference repo: https://github.com/ETSoftwareStudio/obd-scanner-android
+•	Kotlin OBD API reference repo: https://github.com/pires/obd-java-api
+•	Kia owner manuals: https://owners.kia.com/content/owners/en/manuals.html
+•	NHTSA manufacturer communications / TSB search (US-market reference only): https://www.nhtsa.gov/vehicle
+Final hand-off reminder
+The deliverable is a responsive native Android app with a real standard OBD2 engine, not a static concept. A real adapter and the actual Sportage are required to validate physical Bluetooth communication, supported PIDs and vehicle-specific behaviour. Until then, implement a complete simulator and label all simulated data.
+

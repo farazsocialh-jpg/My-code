@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+/* Use the visual viewport on mobile and keep the app clear of Android/iOS system UI. */
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+#root,
+#root * {
+  box-sizing: border-box;
+}
+
+/* The launcher uses fixed viewport utility classes; constrain them to the safe viewport. */
+#root > div.w-screen.h-screen {
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+#root > div.w-screen.h-screen > div {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+@media (orientation: portrait) {
+  /* Put the navigation dock above the content instead of squeezing the cockpit. */
+  #root > div.w-screen.h-screen > div > div:first-child {
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  #root > div.w-screen.h-screen > div > div:first-child > aside {
+    width: 100%;
+    min-height: 0;
+    padding: 0.35rem 0.5rem;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid rgb(30 41 59 / 0.9);
+  }
+
+  #root > div.w-screen.h-screen > div > div:first-child > aside > div {
+    width: auto;
+    flex-direction: row;
+    flex-shrink: 0;
+  }
+
+  #root > div.w-screen.h-screen > div > div:first-child > aside button {
+    flex-shrink: 0;
+  }
+
+  #root > div.w-screen.h-screen > div > div:first-child > div {
+    width: 100%;
+    min-height: 0;
+    flex: 1 1 auto;
+  }
+
+  /* Stack gauges and navigation in portrait and let the page scroll naturally. */
+  #root > div.w-screen.h-screen > div > div:first-child > div > div:first-child {
+    height: auto;
+    min-height: 0;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  #root > div.w-screen.h-screen > div > div:first-child > div > div:first-child > div {
+    width: 100%;
+    height: auto;
+    min-height: min(52dvh, 30rem);
+    flex: 0 0 auto;
+  }
+
+  #root > div.w-screen.h-screen > footer {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding-bottom: max(0.375rem, env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (max-width: 640px) and (orientation: portrait) {
+  /* Keep the media controls usable on narrow phones; hide optional resolution presets. */
+  #root > div.w-screen.h-screen > div > footer > div:nth-child(2) > div:first-child {
+    display: none;
+  }
+}

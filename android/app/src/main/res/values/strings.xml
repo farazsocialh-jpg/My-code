@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sportage OBD</string>
+    <string name="app_label">Sportage OBD-II Intelligence</string>
+    <string name="app_description">OBD-II diagnostics + car launcher for Kia Sportage</string>
+    <string name="launcher_intent_label">Open Sportage OBD</string>
+    <string name="home_intent_label">Sportage OBD Home</string>
+</resources>

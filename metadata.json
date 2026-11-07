@@ -1,0 +1,6 @@
+{
+  "name": "Sportage OBD-II Car Launcher",
+  "description": "Kia Sportage OBD-II Car Launcher and Cockpit Telemetry with ELM327 Bluetooth/BLE, DTC diagnostics, and trip metrics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

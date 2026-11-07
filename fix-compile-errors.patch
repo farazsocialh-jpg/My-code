@@ -1,0 +1,3254 @@
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/obd/Mode06MonitorResult.kt b/android/app/src/main/java/com/sportage/obd/obd/Mode06MonitorResult.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/obd/Mode06MonitorResult.kt	2026-11-07 16:35:35.199485336 +0000
++++ b/android/app/src/main/java/com/sportage/obd/obd/Mode06MonitorResult.kt	2026-11-07 16:43:04.701362664 +0000
+@@ -34,9 +34,9 @@
+     /** Number of condition encounters. */
+     val conditionsEncountered: Int,
+     /** Completion fraction in 0..1 when conditions > 0, otherwise null. */
+-    val completionFraction: Float? get() = if (conditionsEncountered > 0) completionCount.toFloat() / conditionsEncountered.toFloat() else null,
++    val completionFraction: Float? = if (conditionsEncountered > 0) completionCount.toFloat() / conditionsEncountered.toFloat() else null,
+     /** Raw one-line display of the two count bytes, if useful to the user. */
+-    val rawCounts: String get() = "$completionCount / $conditionsEncountered"
++    val rawCounts: String = "$completionCount / $conditionsEncountered"
+ )
+ 
+ /**
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/repository/ObdRepository.kt b/android/app/src/main/java/com/sportage/obd/repository/ObdRepository.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/repository/ObdRepository.kt	2026-11-07 16:35:35.199969754 +0000
++++ b/android/app/src/main/java/com/sportage/obd/repository/ObdRepository.kt	2026-11-07 16:43:27.304385670 +0000
+@@ -28,6 +28,7 @@
+ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+ import kotlinx.coroutines.isActive
++import kotlin.math.sin
+ import kotlinx.coroutines.launch
+ 
+ /** ObdRepository: Single source of truth for OBD-II vehicle state. */
+@@ -405,6 +406,10 @@
+         if (!_isDemoMode.value) obdService?.readVehicleInformation()
+     }
+ 
++    suspend fun refreshSensorCapabilities() {
++        if (!_isDemoMode.value) obdService?.refreshSensorCapabilities()
++    }
++
+     suspend fun readVin(): String? {
+         return if (_isDemoMode.value) {
+             delay(800)
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/service/ObdService.kt b/android/app/src/main/java/com/sportage/obd/service/ObdService.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/service/ObdService.kt	2026-11-07 16:35:35.200483927 +0000
++++ b/android/app/src/main/java/com/sportage/obd/service/ObdService.kt	2026-11-07 16:43:13.606473837 +0000
+@@ -513,7 +513,7 @@
+     }
+ 
+     /** Mode 09 PID 02: vehicle identification number. */
+-    suspend fun readVin(): String?
++    suspend fun readVin(): String? {
+         return try {
+             val response = transport.sendCommand("0902")
+             val vin = PidDecoders.decodeVin(response)
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/AdvancedDiagnosticsPage.kt b/android/app/src/main/java/com/sportage/obd/ui/AdvancedDiagnosticsPage.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/AdvancedDiagnosticsPage.kt	2026-11-07 16:35:35.200714992 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/AdvancedDiagnosticsPage.kt	2026-11-07 16:43:35.242381972 +0000
+@@ -244,7 +244,7 @@
+                                 if (it.rawResponse.isNotBlank() && it.rawResponse != "No response") append(" · raw preserved")
+                             }
+                         } ?: "not requested yet") +
+-                        (mode06MonitorResult?.standardShape != true ? "; raw Mode 06 preserved where no SAE J1979 shape matches" : "") +
++                        (if (mode06MonitorResult?.standardShape != true) "; raw Mode 06 preserved where no SAE J1979 shape matches" else "") +
+                         ". Not a diagnosis — limits are not assumed.",
+                     color = SecondaryText(), style = MaterialTheme.typography.labelSmall
+                 )
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/BluetoothDialog.kt b/android/app/src/main/java/com/sportage/obd/ui/BluetoothDialog.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/BluetoothDialog.kt	2026-11-07 16:35:35.201500577 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/BluetoothDialog.kt	2026-11-07 16:42:55.036813262 +0000
+@@ -1,14 +1,632 @@
+-                    )
+-                                        }
++package com.sportage.obd.ui
++
++import com.sportage.obd.bluetooth.rowState
++import kotlinx.coroutines.delay
++
++import android.annotation.SuppressLint
++import android.bluetooth.BluetoothAdapter
++import android.bluetooth.BluetoothDevice
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import android.content.IntentFilter
++import android.os.Build
++import android.provider.Settings
++import androidx.core.content.ContextCompat
++import androidx.compose.foundation.BorderStroke
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.*
++import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.lazy.items
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.*
++import androidx.compose.material3.*
++import androidx.compose.runtime.*
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.font.FontFamily
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.compose.ui.window.Dialog
++import androidx.compose.ui.window.DialogProperties
++import com.sportage.obd.bluetooth.BluetoothDeviceInfo
++import com.sportage.obd.bluetooth.ConnectionState
++import com.sportage.obd.ui.theme.*
++
++data class TerminalLog(
++    val direction: String, // "TX", "RX", "INFO", "ERR"
++    val text: String,
++    val time: String
++)
++
++/**
++ * Defensive classification for the connect action on a paired (or discovered) device.
++ *
++ * The Android Bluetooth stack can still list a device as bonded even after it has gone
++ * unreachable (powered off, out of range, unpaired on the adapter side). Tapping such a
++ * device must not drive the app straight into a connect attempt that can throw or crash.
++ *
++ * This does not change map behaviour (CarLauncherScreen.kt) — it only makes
++ * the Bluetooth dialog refuse to start a connect when the target device is clearly unavailable.
++ */
++object BluetoothDeviceConnectGuard {
++    /** Reasons a device should not be connected from the UI right now. */
++    sealed class UnavailableReason {
++        data class MissingAddress(val device: BluetoothDevice) : UnavailableReason()
++        data class AlreadyConnected(val device: BluetoothDevice, val currentAddress: String) : UnavailableReason()
++        data class AlreadyConnecting(val device: BluetoothDevice) : UnavailableReason()
++        data class AdapterOff(val device: BluetoothDevice) : UnavailableReason()
++
++        val shortMessage: String
++            get() = when (this) {
++                is MissingAddress -> "device has no address"
++                is AlreadyConnected -> "already connected to this adapter"
++                is AlreadyConnecting -> "connection already in progress"
++                is AdapterOff -> "Bluetooth is off"
++            }
++
++        fun detailMessage(deviceLabel: String): String =
++            "$shortMessage (device $deviceLabel)"
++    }
++
++    /**
++     * True when a paired device is safe to pass into the connect path from the UI.
++     *
++     * Deliberately does NOT reject devices with a null/blank cached name or a transient
++     * bond state: many ELM327 adapters report no name while idle, and refusing them made
++     * the "Connect" button permanently disabled for valid paired adapters. A failed connect
++     * now surfaces as a ConnectionState.Error in the dialog instead of blocking the button.
++     *
++     * Requires a non-null [context] because reading a device address needs it (and on
++     * Android 12+ needs BLUETOOTH_CONNECT). When the context is unavailable the guard treats
++     * the device as not connectable rather than crashing.
++     */
++    fun canConnectTo(
++        device: BluetoothDevice,
++        connectionState: ConnectionState,
++        context: Context
++    ): Pair<Boolean, UnavailableReason?> {
++        val address = BluetoothDeviceInfo.address(context, device)
++        if (address.isNullOrBlank()) {
++            return Pair(false, UnavailableReason.MissingAddress(device))
++        }
++
++        val adapter = BluetoothAdapter.getDefaultAdapter()
++        if (adapter == null || runCatching { !adapter.isEnabled }.getOrDefault(true)) {
++            return Pair(false, UnavailableReason.AdapterOff(device))
++        }
++
++        if (connectionState is ConnectionState.Connected) {
++            val currentAddress = (connectionState as ConnectionState.Connected).address
++            if (currentAddress.equals(address, ignoreCase = true)) {
++                return Pair(false, UnavailableReason.AlreadyConnected(device, currentAddress))
++            }
++        }
++
++        if (connectionState is ConnectionState.Connecting) {
++            // Do not start a second connect while one is already in flight.
++            return Pair(false, UnavailableReason.AlreadyConnecting(device))
++        }
++
++        return Pair(true, null)
++    }
++
++    /**
++     * Human-readable label for an unavailable device, used only in error messages.
++     *
++     * Uses the same permission-safe accessors as the rest of the dialog, so this never throws
++     * even when BLUETOOTH_CONNECT has not been granted yet.
++     */
++    fun deviceLabel(context: Context, device: BluetoothDevice): String {
++        val address = BluetoothDeviceInfo.address(context, device)
++        val name = BluetoothDeviceInfo.displayName(context, device, "")
++        return buildString {
++            if (name.isNotBlank()) append(name)
++            if (name.isNotBlank()) append(" (")
++            if (!address.isNullOrBlank()) append("MAC: $address")
++            if (name.isNotBlank()) append(")")
++        }.ifBlank { "unknown device" }
++    }
++}
++
++private fun ConnectionState.isConnecting(): Boolean =
++    this is ConnectionState.Connecting
++
++private fun ConnectionState.currentAddress(): String? =
++    if (this is ConnectionState.Connected) (this as ConnectionState.Connected).address else null
++
++@SuppressLint("MissingPermission")
++@OptIn(ExperimentalLayoutApi::class)
++@Composable
++fun BluetoothDialog(
++    isOpen: Boolean,
++    onClose: () -> Unit,
++    connectionState: ConnectionState,
++    pairedDevices: List<BluetoothDevice>,
++    onConnectDevice: (BluetoothDevice, Boolean) -> Unit,
++    onDisconnect: () -> Unit,
++    onRefreshDevices: () -> Unit,
++    onSendCommand: (String) -> Unit,
++    terminalLogs: List<TerminalLog>,
++    isDemoMode: Boolean,
++    onToggleDemoMode: (Boolean) -> Unit
++) {
++    if (!isOpen) return
++
++    val context = LocalContext.current
++    var selectedTab by remember { mutableStateOf(0) } // 0: Devices, 1: Terminal, 2: Help
++    var commandInput by remember { mutableStateOf("") }
++
++    // Deferred pairing state for the "Pair & Connect" button.
++    var pendingPairDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
++    var pendingPairFailed by remember { mutableStateOf<String?>(null) }
++
++    val discoveredDevices = remember { mutableStateListOf<BluetoothDevice>() }
++    var isScanningNearby by remember { mutableStateOf(false) }
++
++    val bleDevices = remember { mutableStateListOf<BluetoothDevice>() }
++    var isScanningBle by remember { mutableStateOf(false) }
++    val latestConnectionState by rememberUpdatedState(connectionState)
++    val latestConnect by rememberUpdatedState(onConnectDevice)
++    val bleScanCallback = remember {
++        object : android.bluetooth.le.ScanCallback() {
++            override fun onScanResult(callbackType: Int, result: android.bluetooth.le.ScanResult) {
++                try {
++                    val device = result.device ?: return
++                    val advertised = result.scanRecord?.deviceName ?: device.name
++                    val uuids = result.scanRecord?.serviceUuids
++                    val looksElm = advertised != null && listOf("obd", "elm", "vgate", "icar", "carista").any {
++                        advertised!!.lowercase().contains(it)
++                    } || (uuids != null && com.sportage.obd.bluetooth.BleTransport.looksLikeElmBle(uuids!!))
++                    if (looksElm && bleDevices.none { it.address == device.address }) {
++                        bleDevices.add(device)
++                    }
++                } catch (_: SecurityException) {}
++            }
++        }
++    }
++
++    fun startBleScan() {
++        if (latestConnectionState is ConnectionState.Connecting || pendingPairDevice != null) return
++        try {
++            val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
++            val scanner = adapter.bluetoothLeScanner ?: return
++            bleDevices.clear()
++            scanner.startScan(null, android.bluetooth.le.ScanSettings.Builder().build(), bleScanCallback)
++            isScanningBle = true
++        } catch (_: Exception) {}
++    }
++
++    fun stopBleScan() {
++        try {
++            BluetoothAdapter.getDefaultAdapter()?.bluetoothLeScanner?.stopScan(bleScanCallback)
++        } catch (_: Exception) {}
++        isScanningBle = false
++    }
++
++    fun startNearbyScan() {
++        if (latestConnectionState is ConnectionState.Connecting || pendingPairDevice != null) return
++        stopBleScan()
++        // Explicit, user-initiated scan only (never automatic). Any in-flight RFCOMM
++        // connect is aborted first: discovery and socket connects cannot run together
++        // on most Android Bluetooth stacks and doing both made connects fail instantly.
++        try {
++            val adapter = BluetoothAdapter.getDefaultAdapter()
++            if (adapter != null && adapter.isEnabled) {
++                discoveredDevices.clear()
++                if (adapter.isDiscovering) {
++                    adapter.cancelDiscovery()
++                }
++                isScanningNearby = adapter.startDiscovery()
++            }
++        } catch (_: SecurityException) {
++            // BLUETOOTH_SCAN not granted: stay silent, the paired list still works.
++        } catch (_: Exception) {}
++    }
++
++    fun connectSelected(device: BluetoothDevice, ble: Boolean) {
++        stopBleScan()
++        runCatching { BluetoothAdapter.getDefaultAdapter()?.cancelDiscovery() }
++        isScanningNearby = false
++        latestConnect(device, ble)
++    }
++
++    LaunchedEffect(isScanningBle) {
++        if (isScanningBle) { delay(15_000); stopBleScan() }
++    }
++
++    LaunchedEffect(pendingPairDevice) {
++        if (pendingPairDevice != null) {
++            delay(30_000)
++            pendingPairDevice = null
++            pendingPairFailed = "Pairing timed out. Check the adapter PIN in Bluetooth Settings."
++        }
++    }
++
++    DisposableEffect(isOpen) {
++        if (!isOpen) return@DisposableEffect onDispose {}
++
++        val receiver = object : BroadcastReceiver() {
++            override fun onReceive(c: Context?, intent: Intent?) {
++                when (intent?.action) {
++                    BluetoothDevice.ACTION_FOUND -> {
++                        val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++                            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
++                        } else {
++                            @Suppress("DEPRECATION")
++                            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
++                        }
++                        if (device != null) {
++                            // Reading name/address needs BLUETOOTH_CONNECT on Android 12+; a raw
++                            // read here threw inside a BroadcastReceiver and killed the process.
++                            val name = BluetoothDeviceInfo.displayName(context, device, "")
++                            val addr = BluetoothDeviceInfo.address(context, device)
++                            if (name.isNotBlank() && addr != null &&
++                                discoveredDevices.none { BluetoothDeviceInfo.address(context, it) == addr } &&
++                                pairedDevices.none { BluetoothDeviceInfo.address(context, it) == addr }
++                            ) {
++                                discoveredDevices.add(device)
++                            }
++                        }
++                    }
++                    BluetoothAdapter.ACTION_DISCOVERY_STARTED -> {
++                        isScanningNearby = true
++                    }
++                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
++                        isScanningNearby = false
++                    }
++                }
++            }
++        }
++
++        val filter = IntentFilter().apply {
++            addAction(BluetoothDevice.ACTION_FOUND)
++            addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
++            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
++        }
++        // RECEIVER_NOT_EXPORTED: some Chinese head-unit ROMs throw SecurityException when a
++        // receiver is registered without an export flag on targetSdk 35 - that crash killed
++        // the app the moment the Bluetooth dialog opened.
++        try {
++            ContextCompat.registerReceiver(
++                context,
++                receiver,
++                filter,
++                ContextCompat.RECEIVER_EXPORTED
++            )
++        } catch (_: Exception) {}
++
++        // Discovery is NEVER started automatically. On Android head units (TS10 / UIS7862 /
++        // MTK) an app-initiated discovery makes the unit's Bluetooth stack refresh and
++        // re-pair EVERY cached device, which looked like "pairing with all devices" and
++        // crashed the app. Scanning is strictly opt-in via the "Scan Nearby" button, and
++        // an error state no longer triggers a background scan that would also kill any
++        // RFCOMM connect attempt already in flight.
++        // To scan: the driver taps "Scan Nearby" / "Scan for Adapters" explicitly.
++
++        onDispose {
++            try {
++                BluetoothAdapter.getDefaultAdapter()?.cancelDiscovery()
++                context.unregisterReceiver(receiver)
++            } catch (_: Exception) {}
++            try {
++                BluetoothAdapter.getDefaultAdapter()?.bluetoothLeScanner?.stopScan(bleScanCallback)
++            } catch (_: Exception) {}
++        }
++    }
++
++    // Watches the device being paired so the RFCOMM connect only starts once bonding completes.
++    DisposableEffect(pendingPairDevice) {
++        val device = pendingPairDevice
++        if (device == null) return@DisposableEffect onDispose {}
++
++        val bondReceiver = object : BroadcastReceiver() {
++            override fun onReceive(c: Context?, intent: Intent?) {
++                if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
++                @Suppress("DEPRECATION")
++                val changed = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
++                val expectedAddress = BluetoothDeviceInfo.address(context, device) ?: return
++                if (changed == null || !expectedAddress.equals(
++                        BluetoothDeviceInfo.address(context, changed), ignoreCase = true)) return
++
++                @Suppress("DEPRECATION")
++                val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
++
++                when (bondState) {
++                    BluetoothDevice.BOND_BONDED -> {
++                        pendingPairDevice = null
++                        pendingPairFailed = null
++                        val (canConnect, reason) = BluetoothDeviceConnectGuard.canConnectTo(
++                            device = device,
++                            connectionState = latestConnectionState,
++                            context = context
++                        )
++                        if (canConnect) {
++                            onRefreshDevices()
++                            runCatching { connectSelected(device, false) }
++                        } else {
++                            val label = BluetoothDeviceConnectGuard.deviceLabel(context, device)
++                            pendingPairFailed = "Paired, but unavailable to connect: ${reason?.detailMessage(label) ?: "unknown"}"
++                        }
++                    }
++                    BluetoothDevice.BOND_NONE -> {
++                        pendingPairDevice = null
++                        pendingPairFailed = "Pairing was cancelled or did not complete. Tap to retry."
++                    }
++                }
++            }
++        }
++
++        try {
++            ContextCompat.registerReceiver(
++                context,
++                bondReceiver,
++                IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
++                ContextCompat.RECEIVER_EXPORTED
++            )
++            // Register first: a fast bond completion must not race receiver installation.
++            if (device.bondState == BluetoothDevice.BOND_BONDED) {
++                pendingPairDevice = null
++                connectSelected(device, false)
++            } else if (!device.createBond()) {
++                pendingPairDevice = null
++                pendingPairFailed = "Pairing request was rejected. Try Android Bluetooth Settings."
++            }
++        } catch (e: Exception) {
++            pendingPairDevice = null
++            pendingPairFailed = "Pairing failed: ${e.localizedMessage}"
++        }
++
++        onDispose {
++            try {
++                context.unregisterReceiver(bondReceiver)
++            } catch (_: Exception) {}
++        }
++    }
++
++    Dialog(
++        onDismissRequest = onClose,
++        properties = DialogProperties(usePlatformDefaultWidth = false)
++    ) {
++        Surface(
++            modifier = Modifier
++                .fillMaxWidth(0.92f)
++                .fillMaxHeight(0.88f),
++            color = DeepShade(),
++            shape = RoundedCornerShape(16.dp),
++            border = BorderStroke(1.dp, DarkSurfaceElevated())
++        ) {
++            Column(
++                modifier = Modifier
++                    .fillMaxSize()
++                    .padding(16.dp)
++            ) {
++                // Header
++                Row(
++                    modifier = Modifier.fillMaxWidth(),
++                    horizontalArrangement = Arrangement.SpaceBetween,
++                    verticalAlignment = Alignment.CenterVertically
++                ) {
++                    Row(
++                        verticalAlignment = Alignment.CenterVertically,
++                        horizontalArrangement = Arrangement.spacedBy(8.dp)
++                    ) {
++                        Surface(
++                            color = TealAccent().copy(alpha = 0.15f),
++                            shape = RoundedCornerShape(8.dp)
++                        ) {
++                            Icon(
++                                Icons.Default.Bluetooth,
++                                contentDescription = null,
++                                tint = TealAccent(),
++                                modifier = Modifier
++                                    .padding(6.dp)
++                                    .size(20.dp)
++                            )
++                        }
++                        Column(modifier = Modifier.weight(1f, fill = false)) {
++                            Text(
++                                text = "BLUETOOTH OBD2 INTERFACE",
++                                color = PrimaryText(),
++                                fontSize = 14.sp,
++                                fontWeight = FontWeight.Bold,
++                                fontFamily = FontFamily.SansSerif
++                            )
++                            Text(
++                                text = when (connectionState) {
++                                    is ConnectionState.Connected -> "ACTIVE: ${(connectionState as ConnectionState.Connected).deviceName} (${(connectionState as ConnectionState.Connected).address})"
++                                    is ConnectionState.Connecting -> "CONNECTING TO ${(connectionState as ConnectionState.Connecting).address ?: "ADAPTER"} - PLEASE WAIT..."
++                                    is ConnectionState.Error -> "ERROR: ${(connectionState as ConnectionState.Error).message}"
++                                    else -> if (isDemoMode) "DEMO BENCH TESTING ACTIVE" else "NOT CONNECTED · SELECT ADAPTER"
++                                },
++                                color = when (connectionState) {
++                                    is ConnectionState.Connected -> TealAccent()
++                                    is ConnectionState.Connecting -> ElectricCyan()
++                                    is ConnectionState.Error -> CriticalRed()
++                                    else -> SecondaryText()
++                                },
++                                fontSize = 12.sp,
++                                fontFamily = FontFamily.SansSerif
++                            )
++                        }
++                    }
++
++                    IconButton(
++                        onClick = onClose,
++                        modifier = Modifier
++                            .size(32.dp)
++                            .background(DarkSurfaceElevated(), RoundedCornerShape(8.dp))
++                    ) {
++                        Icon(Icons.Default.Close, contentDescription = "Close", tint = SecondaryText(), modifier = Modifier.size(16.dp))
++                    }
++                }
++
++                Spacer(modifier = Modifier.height(12.dp))
++
++                if (connectionState is ConnectionState.Connecting) {
++                    TextButton(onClick = onDisconnect) {
++                        Text("Cancel connection", color = CriticalRed(), fontSize = 12.sp)
++                    }
++                }
++
++                // Segmented Tabs: DEVICES | TERMINAL | TROUBLESHOOTING
++                Row(
++                    modifier = Modifier
++                        .fillMaxWidth()
++                        .background(DeepShade(), RoundedCornerShape(8.dp))
++                        .padding(3.dp),
++                    horizontalArrangement = Arrangement.spacedBy(4.dp)
++                ) {
++                    listOf("PAIRED ADAPTERS", "BLE SCAN", "RAW TERMINAL", "TROUBLESHOOTING").forEachIndexed { index, tabTitle ->
++                        Surface(
++                            modifier = Modifier
++                                .weight(1f)
++                                .clickable { selectedTab = index },
++                            color = if (selectedTab == index) ElectricCyan() else Color.Transparent,
++                            shape = RoundedCornerShape(6.dp)
++                        ) {
++                            Text(
++                                text = tabTitle,
++                                color = if (selectedTab == index) OnAccent() else SecondaryText(),
++                                fontSize = 11.sp,
++                                fontWeight = FontWeight.Bold,
++                                fontFamily = FontFamily.SansSerif,
++                                modifier = Modifier
++                                    .padding(vertical = 6.dp)
++                                    .wrapContentWidth(Alignment.CenterHorizontally)
++                            )
++                        }
++                    }
++                }
++
++                Spacer(modifier = Modifier.height(12.dp))
++
++                // TAB 0: DEVICES & DISCOVERY
++                if (selectedTab == 0) {
++                    Column(modifier = Modifier.weight(1f)) {
++                        // Error banner if connection failed
++                        if (connectionState is ConnectionState.Error) {
++                            Surface(
++                                modifier = Modifier
++                                    .fillMaxWidth()
++                                    .padding(bottom = 10.dp),
++                                color = CriticalRed().copy(alpha = 0.15f),
++                                shape = RoundedCornerShape(8.dp),
++                                border = BorderStroke(1.dp, CriticalRed().copy(alpha = 0.5f))
++                            ) {
++                                Row(
++                                    modifier = Modifier.padding(10.dp),
++                                    verticalAlignment = Alignment.CenterVertically,
++                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
++                                ) {
++                                    Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = CriticalRed(), modifier = Modifier.size(20.dp))
++                                    Column(modifier = Modifier.weight(1f)) {
++                                        Text(
++                                            text = "ADAPTER CONNECTION FAILED",
++                                            color = CriticalRed(),
++                                            fontWeight = FontWeight.Bold,
++                                            fontSize = 11.sp,
++                                            fontFamily = FontFamily.SansSerif
++                                        )
++                                        Text(
++                                            text = (connectionState as ConnectionState.Error).message + " · Select an adapter below to pair and connect.",
++                                            color = SecondaryText(),
++                                            fontSize = 12.sp,
++                                            fontFamily = FontFamily.SansSerif
++                                        )
++                                    }
++                                    Button(
++                                        onClick = { startNearbyScan() },
++                                        colors = ButtonDefaults.buttonColors(containerColor = CriticalRed()),
++                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
++                                        shape = RoundedCornerShape(6.dp)
++                                    ) {
++                                        Text("Scan", fontSize = 12.sp, color = DarkBackground(), fontFamily = FontFamily.SansSerif)
++                                    }
++                                }
++                            }
++                        }
++
++                        // Toolbar
++                        Column(
++                            modifier = Modifier.fillMaxWidth(),
++                            verticalArrangement = Arrangement.spacedBy(6.dp)
++                        ) {
++                            Text(
++                                text = "DEVICES: ${pairedDevices.size} PAIRED · ${discoveredDevices.size} DISCOVERED",
++                                color = SecondaryText(),
++                                fontSize = 12.sp,
++                                fontFamily = FontFamily.SansSerif
++                            )
++
++                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
++                                Button(
++                                    onClick = { startNearbyScan() },
++                                    enabled = !isScanningNearby && connectionState !is ConnectionState.Connecting && pendingPairDevice == null,
++                                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
++                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
++                                    shape = RoundedCornerShape(6.dp)
++                                ) {
++                                    if (isScanningNearby) {
++                                        CircularProgressIndicator(color = ElectricCyan(), modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
++                                        Spacer(modifier = Modifier.width(4.dp))
++                                        Text("Scanning...", fontSize = 12.sp, color = ElectricCyan(), fontFamily = FontFamily.SansSerif)
++                                    } else {
++                                        Icon(Icons.Default.BluetoothSearching, contentDescription = null, modifier = Modifier.size(12.dp), tint = ElectricCyan())
++                                        Spacer(modifier = Modifier.width(4.dp))
++                                        Text("Scan Nearby", fontSize = 12.sp, color = ElectricCyan(), fontFamily = FontFamily.SansSerif)
+                                     }
+                                 }
++
++                                Button(
++                                    onClick = onRefreshDevices,
++                                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
++                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
++                                    shape = RoundedCornerShape(6.dp)
++                                ) {
++                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(12.dp), tint = SecondaryText())
++                                    Spacer(modifier = Modifier.width(4.dp))
++                                    Text("Refresh", fontSize = 12.sp, color = SecondaryText(), fontFamily = FontFamily.SansSerif)
++                                }
++
++                                Button(
++                                    onClick = {
++                                        try {
++                                            context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
++                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++                                            })
++                                        } catch (_: Exception) {}
++                                    },
++                                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
++                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
++                                    shape = RoundedCornerShape(6.dp)
++                                ) {
++                                    Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(12.dp), tint = PrimaryText())
++                                    Spacer(modifier = Modifier.width(4.dp))
++                                    Text("System Settings", fontSize = 12.sp, color = PrimaryText(), fontFamily = FontFamily.SansSerif)
++                                }
+                             }
++                        }
++
++                        Spacer(modifier = Modifier.height(8.dp))
+ 
+-                            // Section: BLE Devices
+-                            if (bleDevices.isNotEmpty()) {
++                        LazyColumn(
++                            modifier = Modifier
++                                .fillMaxWidth()
++                                .weight(1f),
++                            verticalArrangement = Arrangement.spacedBy(8.dp)
++                        ) {
++                            // Section: Paired Devices
++                            if (pairedDevices.isNotEmpty()) {
+                                 item {
+                                     Text(
+-                                        text = "BLE SCAN · ELM327 ADAPTERS",
++                                        text = "PAIRED BLUETOOTH ADAPTERS",
+                                         color = SecondaryText(),
+                                         fontSize = 12.sp,
+                                         fontWeight = FontWeight.Bold,
+@@ -17,20 +635,31 @@
+                                     )
+                                 }
+ 
+-                                items(bleDevices) { device ->
+-                                    val devName = BluetoothDeviceInfo.displayName(context, device, "Unknown BLE Device")
+-                                    val deviceAddress = BluetoothDeviceInfo.address(context, device)
++                                items(pairedDevices) { device ->
++                                    val rowState = connectionState.rowState(BluetoothDeviceInfo.address(context, device))
++                                    val devName = BluetoothDeviceInfo.displayName(context, device, "Unknown Bluetooth Device")
+                                     val isObd = devName.lowercase().contains("obd") ||
+                                             devName.lowercase().contains("elm") ||
+                                             devName.lowercase().contains("vgate") ||
+                                             devName.lowercase().contains("carista")
+ 
++                                    val deviceAddress = BluetoothDeviceInfo.address(context, device)
++                                    val isCurrentConnected = connectionState is ConnectionState.Connected &&
++                                            connectionState.currentAddress()?.equals(deviceAddress, ignoreCase = true) == true
++
++                                    val (canConnect, _) = BluetoothDeviceConnectGuard.canConnectTo(
++                                        device = device,
++                                        connectionState = connectionState,
++                                        context = context
++                                    )
++                                    val connectButtonLabel = rowState.label
++
+                                     Surface(
+-                                        color = DarkSurface(),
++                                        color = if (isCurrentConnected) DarkSurface() else DarkSurface(),
+                                         shape = RoundedCornerShape(10.dp),
+                                         border = BorderStroke(
+                                             1.dp,
+-                                            if (isObd) ElectricCyan().copy(alpha = 0.5f) else DarkSurfaceElevated()
++                                            if (isCurrentConnected) TealAccent() else if (isObd) ElectricCyan().copy(alpha = 0.5f) else DarkSurfaceElevated()
+                                         )
+                                     ) {
+                                         Row(
+@@ -46,13 +675,13 @@
+                                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                             ) {
+                                                 Surface(
+-                                                    color = DarkSurfaceElevated(),
++                                                    color = if (isCurrentConnected) TealAccent().copy(alpha = 0.2f) else DarkSurfaceElevated(),
+                                                     shape = RoundedCornerShape(8.dp)
+                                                 ) {
+                                                     Icon(
+-                                                        Icons.Default.Bluetooth,
++                                                        Icons.Default.DirectionsCar,
+                                                         contentDescription = null,
+-                                                        tint = if (isObd) ElectricCyan() else SecondaryText(),
++                                                        tint = if (isCurrentConnected) TealAccent() else if (isObd) ElectricCyan() else SecondaryText(),
+                                                         modifier = Modifier
+                                                             .padding(8.dp)
+                                                             .size(20.dp)
+@@ -60,29 +689,147 @@
+                                                 }
+ 
+                                                 Column(modifier = Modifier.weight(1f)) {
++                                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
++                                                        Text(
++                                                            text = devName,
++                                                            color = PrimaryText(),
++                                                            fontSize = 13.sp,
++                                                            maxLines = 1,
++                                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
++                                                            modifier = Modifier.weight(1f, fill = false),
++                                                            fontWeight = FontWeight.Bold,
++                                                            fontFamily = FontFamily.SansSerif
++                                                        )
++                                                        if (isObd) {
++                                                            Text(
++                                                                text = "ELM327 MATCH",
++                                                                color = ElectricCyan(),
++                                                                fontSize = 11.sp,
++                                                                fontWeight = FontWeight.Bold,
++                                                                fontFamily = FontFamily.SansSerif,
++                                                                modifier = Modifier
++                                                                    .background(ElectricCyan().copy(alpha = 0.15f), RoundedCornerShape(4.dp))
++                                                                    .padding(horizontal = 4.dp, vertical = 2.dp)
++                                                                )
++                                                        }
++                                                    }
++                                                    Text(
++                                                        text = deviceAddress?.let { "MAC: $it" } ?: "MAC unavailable",
++                                                        color = SecondaryText(),
++                                                        fontSize = 12.sp,
++                                                        fontFamily = FontFamily.SansSerif
++                                                    )
++                                                }
++                                            }
++
++                                            if (isCurrentConnected) {
++                                                Button(
++                                                    onClick = onDisconnect,
++                                                    colors = ButtonDefaults.buttonColors(containerColor = CriticalRed()),
++                                                    shape = RoundedCornerShape(6.dp),
++                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
++                                                ) {
++                                                    Text("Disconnect", color = DarkBackground(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
++                                                }
++                                            } else {
++                                                Button(
++                                                    // runCatching: even if the connect path throws
++                                                    // (aggressive head-unit ROMs), the app must survive.
++                                                    onClick = { runCatching { connectSelected(device, device.type == BluetoothDevice.DEVICE_TYPE_LE) } },
++                                                    enabled = canConnect && rowState.enabled && pendingPairDevice == null,
++                                                    colors = ButtonDefaults.buttonColors(
++                                                        containerColor = if (isObd) ElectricCyan() else DarkSurfaceElevated()
++                                                    ),
++                                                    shape = RoundedCornerShape(6.dp),
++                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
++                                                ) {
+                                                     Text(
+-                                                        text = devName,
+-                                                        color = PrimaryText(),
+-                                                        fontSize = 13.sp,
+-                                                        maxLines = 1,
+-                                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
++                                                        text = connectButtonLabel,
++                                                        color = if (isObd) OnAccent() else PrimaryText(),
+                                                         fontWeight = FontWeight.Bold,
++                                                        fontSize = 11.sp,
+                                                         fontFamily = FontFamily.SansSerif
+                                                     )
+-                                                    if (isObd) {
++                                                }
++                                            }
++                                        }
++                                    }
++                                }
++                            }
++
++                            // Section: Discovered Nearby Devices
++                            if (discoveredDevices.isNotEmpty()) {
++                                item {
++                                    Spacer(modifier = Modifier.height(4.dp))
++                                    Text(
++                                        text = "NEARBY DISCOVERED ADAPTERS (TAP TO PAIR & CONNECT)",
++                                        color = ElectricCyan(),
++                                        fontSize = 12.sp,
++                                        fontWeight = FontWeight.Bold,
++                                        fontFamily = FontFamily.SansSerif,
++                                        modifier = Modifier.padding(vertical = 4.dp)
++                                    )
++                                }
++
++                                items(discoveredDevices) { device ->
++                                    val devName = BluetoothDeviceInfo.displayName(context, device, "Nearby Bluetooth Device")
++                                    val isObd = devName.lowercase().contains("obd") ||
++                                            devName.lowercase().contains("elm") ||
++                                            devName.lowercase().contains("vgate") ||
++                                            devName.lowercase().contains("carista")
++
++                                    Surface(
++                                        color = DarkSurface(),
++                                        shape = RoundedCornerShape(10.dp),
++                                        border = BorderStroke(1.dp, if (isObd) ElectricCyan().copy(alpha = 0.6f) else DarkSurfaceElevated())
++                                    ) {
++                                        Row(
++                                            modifier = Modifier
++                                                .fillMaxWidth()
++                                                .padding(12.dp),
++                                            horizontalArrangement = Arrangement.SpaceBetween,
++                                            verticalAlignment = Alignment.CenterVertically
++                                        ) {
++                                            Row(
++                                                verticalAlignment = Alignment.CenterVertically,
++                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
++                                            ) {
++                                                Surface(
++                                                    color = DarkSurfaceElevated(),
++                                                    shape = RoundedCornerShape(8.dp)
++                                                ) {
++                                                    Icon(
++                                                        Icons.Default.BluetoothSearching,
++                                                        contentDescription = null,
++                                                        tint = if (isObd) ElectricCyan() else SecondaryText(),
++                                                        modifier = Modifier
++                                                            .padding(8.dp)
++                                                            .size(20.dp)
++                                                    )
++                                                }
++
++                                                Column {
++                                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                         Text(
+-                                                            text = "ELM327 MATCH",
+-                                                            color = ElectricCyan(),
++                                                            text = devName,
++                                                            color = PrimaryText(),
++                                                            fontSize = 13.sp,
++                                                            fontWeight = FontWeight.Bold,
++                                                            fontFamily = FontFamily.SansSerif
++                                                        )
++                                                        Text(
++                                                            text = "NEARBY",
++                                                            color = AmberWarning(),
+                                                             fontSize = 11.sp,
+                                                             fontWeight = FontWeight.Bold,
+                                                             fontFamily = FontFamily.SansSerif,
+                                                             modifier = Modifier
+-                                                                .background(ElectricCyan().copy(alpha = 0.15f), RoundedCornerShape(4.dp))
++                                                                .background(AmberWarning().copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                                                                 .padding(horizontal = 4.dp, vertical = 2.dp)
+                                                         )
+                                                     }
+                                                     Text(
+-                                                        text = deviceAddress?.let { "MAC: $it" } ?: "MAC unavailable",
++                                                        text = BluetoothDeviceInfo.address(context, device)?.let { "MAC: $it" } ?: "MAC unavailable",
+                                                         color = SecondaryText(),
+                                                         fontSize = 12.sp,
+                                                         fontFamily = FontFamily.SansSerif
+@@ -91,138 +838,365 @@
+                                             }
+ 
+                                             Button(
+-                                                onClick = { runCatching { connectSelected(device, true) } },
+-                                                enabled = canConnect && rowState.enabled && pendingPairDevice == null,
+-                                                colors = ButtonDefaults.buttonColors(containerColor = if (isObd) ElectricCyan() else DarkSurfaceElevated()),
++                                                onClick = {
++                                                    pendingPairFailed = null
++                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++                                                        try {
++                                                            val permission = android.Manifest.permission.BLUETOOTH_CONNECT
++                                                            @Suppress("DEPRECATION")
++                                                            val granted = context.checkCallingOrSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
++                                                            if (!granted) {
++                                                                pendingPairFailed = "Bluetooth connection permission is required before pairing."
++                                                                return@Button
++                                                            }
++                                                        } catch (_: SecurityException) {
++                                                            pendingPairFailed = "Bluetooth connection permission is required before pairing."
++                                                            return@Button
++                                                        }
++                                                    }
++
++                                                    stopBleScan()
++                                                    runCatching { BluetoothAdapter.getDefaultAdapter()?.cancelDiscovery() }
++                                                    // The effect registers the receiver before starting the bond.
++                                                    pendingPairDevice = device
++                                                },
++                                                enabled = connectionState !is ConnectionState.Connecting &&
++                                                        pendingPairDevice == null,
++                                                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
+                                                 shape = RoundedCornerShape(6.dp),
+                                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                             ) {
+-                                                Text("Connect", color = OnAccent(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
++                                                Text(
++                                                    text = when {
++                                                        pendingPairFailed != null -> "Retry Pair"
++                                                        pendingPairDevice == device -> "Pairing..."
++                                                        else -> "Pair & Connect"
++                                                    },
++                                                    color = OnAccent(),
++                                                    fontWeight = FontWeight.Bold,
++                                                    fontSize = 11.sp,
++                                                    fontFamily = FontFamily.SansSerif
++                                                )
+                                             }
+                                         }
+                                     }
+                                 }
+                             }
++
++                            // Empty state if both are empty
++                            if (pairedDevices.isEmpty() && discoveredDevices.isEmpty()) {
++                                item {
++                                    Box(
++                                        modifier = Modifier
++                                            .fillMaxWidth()
++                                            .background(DarkSurface(), RoundedCornerShape(10.dp))
++                                            .border(1.dp, DarkSurfaceElevated(), RoundedCornerShape(10.dp))
++                                            .padding(24.dp),
++                                        contentAlignment = Alignment.Center
++                                    ) {
++                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
++                                            if (isScanningNearby) {
++                                                CircularProgressIndicator(color = ElectricCyan(), modifier = Modifier.size(36.dp))
++                                                Spacer(modifier = Modifier.height(10.dp))
++                                                Text("Scanning for Nearby Bluetooth Adapters...", color = PrimaryText(), fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = FontFamily.SansSerif)
++                                                Text("Ensure adapter is plugged into OBD2 port with vehicle ignition ON.", color = SecondaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
++                                            } else {
++                                                Icon(Icons.Default.BluetoothSearching, contentDescription = null, tint = SecondaryText(), modifier = Modifier.size(40.dp))
++                                                Spacer(modifier = Modifier.height(8.dp))
++                                                Text("No OBD2 Adapters Detected", color = PrimaryText(), fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = FontFamily.SansSerif)
++                                                Spacer(modifier = Modifier.height(4.dp))
++                                                Text("Plug ELM327 into the vehicle's OBD2 port and tap Scan Nearby.", color = SecondaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
++                                                Spacer(modifier = Modifier.height(12.dp))
++                                                Button(
++                                                    onClick = { startNearbyScan() },
++                                                    colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
++                                                    shape = RoundedCornerShape(8.dp)
++                                                ) {
++                                                    Text("Scan for Adapters", color = OnAccent(), fontWeight = FontWeight.Bold, fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
++                                                }
++                                            }
++                                        }
++                                    }
++                                }
++                            }
++                        }
++
++                        // Bottom Action Row
++                        Spacer(modifier = Modifier.height(10.dp))
++                        Row(
++                            modifier = Modifier
++                                .fillMaxWidth()
++                                .background(DarkSurface(), RoundedCornerShape(8.dp))
++                                .padding(horizontal = 10.dp, vertical = 6.dp),
++                            horizontalArrangement = Arrangement.SpaceBetween,
++                            verticalAlignment = Alignment.CenterVertically
++                        ) {
++                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
++                                Text("Bench / Demo Simulation:", color = SecondaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
++                                Switch(
++                                    checked = isDemoMode,
++                                    onCheckedChange = onToggleDemoMode,
++                                    colors = SwitchDefaults.colors(checkedThumbColor = ElectricCyan(), checkedTrackColor = ElectricCyan().copy(alpha = 0.4f))
++                                )
++                            }
++
++                            if (connectionState is ConnectionState.Connected) {
++                                Text(
++                                    text = "ISO 15765-4 CAN 11/500K · 10Hz POLLING",
++                                    color = TealAccent(),
++                                    fontSize = 12.sp,
++                                    fontWeight = FontWeight.Bold,
++                                    fontFamily = FontFamily.SansSerif
++                                )
++                            }
+                         }
+                     }
+                 }
+ 
+-                // TAB 1: RAW TERMINAL
++                // TAB 1: BLE SCAN (Low Energy ELM327 adapters)
+                 if (selectedTab == 1) {
+                     Column(modifier = Modifier.weight(1f)) {
+-                        // Terminal input
++                        Text(
++                            text = "BLUETOOTH LOW ENERGY SCAN (VGATE / iCAR / ELM327 BLE)",
++                            color = SecondaryText(),
++                            fontSize = 12.sp,
++                            fontFamily = FontFamily.SansSerif
++                        )
++                        Spacer(modifier = Modifier.height(6.dp))
++
+                         Row(
+                             modifier = Modifier.fillMaxWidth(),
+-                            verticalAlignment = Alignment.CenterVertically
++                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                         ) {
+-                            OutlinedTextField(
+-                                value = commandInput,
+-                                onValueChange = { commandInput = it },
+-                                modifier = Modifier.weight(1f),
+-                                placeholder = { Text("AT command (e.g. ATI, ATRV)", color = SecondaryText()) },
+-                                colors = OutlinedTextFieldDefaults.colors(
+-                                    focusedBorderColor = ElectricCyan(),
+-                                    unfocusedBorderColor = DarkSurfaceElevated(),
+-                                    focusedTextColor = OnAccent(),
+-                                    unfocusedTextColor = SecondaryText(),
+-                                    cursorColor = ElectricCyan()
+-                                ),
+-                                shape = RoundedCornerShape(8.dp),
+-                                textStyle = MaterialTheme.typography.bodyMedium,
+-                                singleLine = true
+-                            )
+-
+-                            Spacer(modifier = Modifier.width(8.dp))
+-
+                             Button(
+-                                onClick = {
+-                                    if (commandInput.isNotBlank()) {
+-                                        onSendCommand(commandInput)
+-                                        commandInput = ""
+-                                    }
+-                                },
+-                                enabled = commandInput.isNotBlank() && connectionState is ConnectionState.Connected,
+-                                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
+-                                shape = RoundedCornerShape(8.dp)
++                                onClick = { if (isScanningBle) stopBleScan() else startBleScan() },
++                                enabled = connectionState !is ConnectionState.Connecting && pendingPairDevice == null,
++                                colors = ButtonDefaults.buttonColors(containerColor = if (isScanningBle) CriticalRed() else ElectricCyan()),
++                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
++                                shape = RoundedCornerShape(6.dp)
+                             ) {
+-                                Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp))
+-                                Spacer(modifier = Modifier.width(4.dp))
+-                                Text("Send", color = OnAccent(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
++                                Text(
++                                    text = if (isScanningBle) "Stop Scan" else "Scan BLE Adapters",
++                                    fontSize = 12.sp,
++                                    color = if (isScanningBle) PrimaryText() else OnAccent(),
++                                    fontWeight = FontWeight.Bold,
++                                    fontFamily = FontFamily.SansSerif
++                                )
+                             }
+                         }
+ 
+                         Spacer(modifier = Modifier.height(8.dp))
+ 
+-                        // Terminal output
+-                        LazyColumn(
+-                            modifier = Modifier
+-                                .fillMaxWidth()
+-                                .weight(1f)
+-                                .background(DarkSurface(), RoundedCornerShape(8.dp)),
+-                            verticalArrangement = Arrangement.spacedBy(2.dp)
++                        if (bleDevices.isEmpty()) {
++                            Box(
++                                modifier = Modifier
++                                    .fillMaxWidth()
++                                    .background(DarkSurface(), RoundedCornerShape(10.dp))
++                                    .border(1.dp, DarkSurfaceElevated(), RoundedCornerShape(10.dp))
++                                    .padding(24.dp),
++                                contentAlignment = Alignment.Center
++                            ) {
++                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
++                                    if (isScanningBle) {
++                                        CircularProgressIndicator(color = ElectricCyan(), modifier = Modifier.size(36.dp))
++                                        Spacer(modifier = Modifier.height(10.dp))
++                                        Text("Scanning for BLE ELM327 adapters...", color = PrimaryText(), fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = FontFamily.SansSerif)
++                                    } else {
++                                        Icon(Icons.Default.Bluetooth, contentDescription = null, tint = SecondaryText(), modifier = Modifier.size(40.dp))
++                                        Spacer(modifier = Modifier.height(8.dp))
++                                        Text("No BLE Adapters Found Yet", color = PrimaryText(), fontWeight = FontWeight.Bold, fontSize = 13.sp, fontFamily = FontFamily.SansSerif)
++                                        Spacer(modifier = Modifier.height(4.dp))
++                                        Text("Plug the adapter in, then tap Scan BLE Adapters. BLE adapters do not need pairing.", color = SecondaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
++                                    }
++                                }
++                            }
++                        } else {
++                            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
++                                items(bleDevices) { device ->
++                                    val bleRow = connectionState.rowState(BluetoothDeviceInfo.address(context, device))
++                                    Surface(
++                                        color = DarkSurface(),
++                                        shape = RoundedCornerShape(10.dp),
++                                        border = BorderStroke(1.dp, ElectricCyan().copy(alpha = 0.6f))
++                                    ) {
++                                        Row(
++                                            modifier = Modifier
++                                                .fillMaxWidth()
++                                                .padding(12.dp),
++                                            horizontalArrangement = Arrangement.SpaceBetween,
++                                            verticalAlignment = Alignment.CenterVertically
++                                        ) {
++                                            Column {
++                                                Text(
++                                                    text = BluetoothDeviceInfo.displayName(context, device, "BLE OBD Adapter"),
++                                                    color = PrimaryText(),
++                                                    fontSize = 13.sp,
++                                                    fontWeight = FontWeight.Bold,
++                                                    fontFamily = FontFamily.SansSerif
++                                                )
++                                                Text(
++                                                    // Raw device.address throws SecurityException on
++                                                    // Android 12+ when BLUETOOTH_CONNECT is missing; the
++                                                    // guarded accessor never throws.
++                                                    text = "MAC: ${BluetoothDeviceInfo.address(context, device) ?: "unavailable"}",
++                                                    color = SecondaryText(),
++                                                    fontSize = 12.sp,
++                                                    fontFamily = FontFamily.SansSerif
++                                                )
++                                            }
++                                            Button(
++                                                onClick = { if (bleRow.connected) onDisconnect() else runCatching { connectSelected(device, true) } },
++                                                enabled = bleRow.enabled && pendingPairDevice == null,
++                                                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
++                                                shape = RoundedCornerShape(6.dp),
++                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
++                                            ) {
++                                                Text(
++                                                    text = if (bleRow.label == "Connect") "Connect BLE" else bleRow.label,
++                                                    color = OnAccent(),
++                                                    fontWeight = FontWeight.Bold,
++                                                    fontSize = 11.sp,
++                                                    fontFamily = FontFamily.SansSerif
++                                                )
++                                            }
++                                        }
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++
++                // TAB 2: RAW TERMINAL
++                if (selectedTab == 2) {
++                    Column(modifier = Modifier.weight(1f)) {
++                        Text(
++                            text = "LIVE ELM327 AT / OBD COMMAND CONSOLE",
++                            color = SecondaryText(),
++                            fontSize = 12.sp,
++                            fontFamily = FontFamily.SansSerif
++                        )
++                        Spacer(modifier = Modifier.height(6.dp))
++
++                        // Quick commands row
++                        Row(
++                            modifier = Modifier.fillMaxWidth(),
++                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                         ) {
+-                            items(terminalLogs) { log ->
+-                                Row(
+-                                    modifier = Modifier
+-                                        .fillMaxWidth()
+-                                        .padding(6.dp),
+-                                    verticalAlignment = Alignment.Top
++                            listOf("ATZ", "ATRV", "0100", "010C", "010D", "03").forEach { cmd ->
++                                Surface(
++                                    modifier = Modifier.clickable { onSendCommand(cmd) },
++                                    color = DarkSurfaceElevated(),
++                                    shape = RoundedCornerShape(4.dp)
+                                 ) {
+                                     Text(
+-                                        text = log.time,
+-                                        color = SecondaryText(),
+-                                        fontSize = 10.sp,
+-                                        fontFamily = FontFamily.Monospace,
+-                                        modifier = Modifier.width(60.dp)
++                                        text = cmd,
++                                        color = ElectricCyan(),
++                                        fontSize = 12.sp,
++                                        fontWeight = FontWeight.Bold,
++                                        fontFamily = FontFamily.SansSerif,
++                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                     )
++                                }
++                            }
++                        }
+ 
+-                                    Surface(
+-                                        color = when (log.direction) {
+-                                            "TX" -> ElectricCyan().copy(alpha = 0.15f)
+-                                            "RX" -> TealAccent().copy(alpha = 0.15f)
+-                                            "INFO" -> DarkSurfaceElevated().copy(alpha = 0.15f)
+-                                            else -> CriticalRed().copy(alpha = 0.15f)
+-                                        },
+-                                        shape = RoundedCornerShape(4.dp)
+-                                    ) {
++                        Spacer(modifier = Modifier.height(8.dp))
++
++                        // Terminal Log Output Box
++                        Surface(
++                            modifier = Modifier
++                                .fillMaxWidth()
++                                .weight(1f),
++                            color = OnAccent(),
++                            shape = RoundedCornerShape(8.dp),
++                            border = BorderStroke(1.dp, DarkSurfaceElevated())
++                        ) {
++                            LazyColumn(
++                                modifier = Modifier
++                                    .fillMaxSize()
++                                    .padding(8.dp),
++                                reverseLayout = true
++                            ) {
++                                items(terminalLogs.reversed()) { log ->
++                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
++                                        Text(
++                                            text = log.time,
++                                            color = SecondaryText(),
++                                            fontSize = 12.sp,
++                                            fontFamily = FontFamily.Monospace
++                                        )
+                                         Text(
+                                             text = log.direction,
+                                             color = when (log.direction) {
+                                                 "TX" -> ElectricCyan()
+                                                 "RX" -> TealAccent()
+-                                                "INFO" -> SecondaryText()
+-                                                else -> CriticalRed()
++                                                "ERR" -> CriticalRed()
++                                                else -> SecondaryText()
+                                             },
+-                                            fontSize = 10.sp,
++                                            fontSize = 12.sp,
+                                             fontWeight = FontWeight.Bold,
+-                                            fontFamily = FontFamily.Monospace,
+-                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
++                                            fontFamily = FontFamily.Monospace
++                                        )
++                                        Text(
++                                            text = log.text,
++                                            color = SecondaryText(),
++                                            fontSize = 12.sp,
++                                            fontFamily = FontFamily.Monospace
+                                         )
+                                     }
++                                }
++                            }
++                        }
+ 
+-                                    Spacer(modifier = Modifier.width(8.dp))
++                        Spacer(modifier = Modifier.height(8.dp))
+ 
+-                                    Text(
+-                                        text = log.text,
+-                                        color = when (log.direction) {
+-                                            "TX" -> ElectricCyan()
+-                                            "RX" -> TealAccent()
+-                                            "INFO" -> SecondaryText()
+-                                            else -> CriticalRed()
+-                                        },
+-                                        fontSize = 11.sp,
+-                                        fontFamily = FontFamily.Monospace,
+-                                        modifier = Modifier.weight(1f)
+-                                    )
+-                                }
++                        // Command input row
++                        Row(
++                            modifier = Modifier.fillMaxWidth(),
++                            horizontalArrangement = Arrangement.spacedBy(8.dp),
++                            verticalAlignment = Alignment.CenterVertically
++                        ) {
++                            OutlinedTextField(
++                                value = commandInput,
++                                onValueChange = { commandInput = it.uppercase() },
++                                modifier = Modifier.weight(1f),
++                                placeholder = { Text("Send OBD command (e.g. 010C or ATRV)...", fontSize = 11.sp, color = SecondaryText(), fontFamily = FontFamily.Monospace) },
++                                singleLine = true,
++                                colors = OutlinedTextFieldDefaults.colors(
++                                    focusedBorderColor = ElectricCyan(),
++                                    unfocusedBorderColor = DarkSurfaceElevated(),
++                                    focusedTextColor = PrimaryText(),
++                                    unfocusedTextColor = SecondaryText()
++                                )
++                            )
++
++                            Button(
++                                onClick = {
++                                    if (commandInput.isNotBlank()) {
++                                        onSendCommand(commandInput.trim())
++                                        commandInput = ""
++                                    }
++                                },
++                                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
++                                shape = RoundedCornerShape(8.dp)
++                            ) {
++                                Text("Send", color = OnAccent(), fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                             }
+                         }
+                     }
+                 }
+ 
+-                // TAB 2: TROUBLESHOOTING
+-                if (selectedTab == 2) {
+-                    Column(modifier = Modifier.weight(1f)) {
++                // TAB 3: TROUBLESHOOTING
++                if (selectedTab == 3) {
++                    Column(
++                        modifier = Modifier
++                            .fillMaxWidth()
++                            .weight(1f)
++                            .background(DarkSurface(), RoundedCornerShape(10.dp))
++                            .padding(14.dp)
++                    ) {
++                        Text("KIA SPORTAGE OBD-II CONNECTION GUIDE", color = ElectricCyan(), fontWeight = FontWeight.Bold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                         Spacer(modifier = Modifier.height(8.dp))
+ 
+                         listOf(
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/CarLauncherScreen.kt b/android/app/src/main/java/com/sportage/obd/ui/CarLauncherScreen.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/CarLauncherScreen.kt	2026-11-07 16:35:35.201875921 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/CarLauncherScreen.kt	2026-11-07 16:46:18.154520554 +0000
+@@ -896,1181 +896,25 @@
+         }
+     }
+ }
+-
+-fun DiagnosticsPage(
+-    dtcCodes: List<DtcItem>,
+-    isScanning: Boolean,
+-    onScan: () -> Unit,
+-    onClear: () -> Unit,
+-    connectionState: ConnectionState,
+-    viewModel: ObdViewModel? = null
+-) {
+-    var showClearConfirm by remember { mutableStateOf(false) }
+-    var selectedTab by remember { mutableStateOf(0) }
+-    val tabs = listOf("Stored (03)", "Pending (07)", "Permanent (0A)", "Freeze Frame", "Readiness")
+-
+-    val pendingCodes = viewModel?.pendingDtcList?.collectAsState()?.value ?: emptyList()
+-    val permanentCodes = viewModel?.permanentDtcList?.collectAsState()?.value ?: emptyList()
+-    val freezeFrame = viewModel?.freezeFrame?.collectAsState()?.value
+-    val readiness = viewModel?.readiness?.collectAsState()?.value
+-    val vin = viewModel?.vin?.collectAsState()?.value
+-    val supportedPids = viewModel?.supportedPids?.collectAsState()?.value ?: emptySet()
+-    val scope = rememberCoroutineScope()
+-
+-    var auxScanning by remember { mutableStateOf(false) }
+-
+-    Column(
+-        modifier = Modifier
+-            .fillMaxSize()
+-            .padding(10.dp),
+-        verticalArrangement = Arrangement.spacedBy(10.dp)
+-    ) {
+-        // Top Action Card
+-        Surface(
+-            modifier = Modifier.fillMaxWidth(),
+-            color = DarkBackground(),
+-            shape = RoundedCornerShape(10.dp),
+-            border = BorderStroke(1.dp, DarkSurfaceElevated())
+-        ) {
+-            Column(
+-                modifier = Modifier
+-                    .fillMaxWidth()
+-                    .padding(12.dp),
+-                verticalArrangement = Arrangement.spacedBy(12.dp)
+-            ) {
+-                Column {
+-                    Text(
+-                        text = "Diagnostics",
+-                        color = PrimaryText(),
+-                        fontSize = 20.sp,
+-                        fontWeight = FontWeight.Bold,
+-                        fontFamily = FontFamily.SansSerif
+-                    )
+-                    Text(
+-                        text = "MODES 03 / 07 / 0A · FREEZE FRAME · READINESS MONITORS",
+-                        color = SecondaryText(),
+-                        fontSize = 12.sp,
+-                        fontFamily = FontFamily.SansSerif
+-                    )
+-                    if (vin != null) {
+-                        Text(
+-                            text = "VIN: $vin",
+-                            color = ElectricCyan(),
+-                            fontSize = 12.sp,
+-                            fontFamily = FontFamily.SansSerif
+-                        )
+-                    }
+-                }
+-
+-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    Button(
+-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+-                        onClick = onScan,
+-                        enabled = !isScanning,
+-                        colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
+-                        shape = RoundedCornerShape(6.dp)
+-                    ) {
+-                        if (isScanning) {
+-                            CircularProgressIndicator(modifier = Modifier.size(14.dp), color = OnAccent(), strokeWidth = 2.dp)
+-                            Spacer(modifier = Modifier.width(6.dp))
+-                            Text("Scanning...", color = OnAccent(), fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                        } else {
+-                            Icon(Icons.Default.Refresh, contentDescription = null, tint = OnAccent(), modifier = Modifier.size(14.dp))
+-                            Spacer(modifier = Modifier.width(4.dp))
+-                            Text("Scan ECU (03)", color = OnAccent(), fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                        }
+-                    }
+-
+-                    Button(
+-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+-                        onClick = { showClearConfirm = true },
+-                        enabled = !isScanning,
+-                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                        shape = RoundedCornerShape(6.dp)
+-                    ) {
+-                        Text("Clear Codes (04)", color = CriticalRed(), fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                    }
+-                }
+-            }
+-        }
+-
+-        // Tabs
+-        ScrollableTabRow(
+-            selectedTabIndex = selectedTab,
+-            edgePadding = 0.dp,
+-            containerColor = DarkBackground(),
+-            contentColor = ElectricCyan()
+-        ) {
+-            tabs.forEachIndexed { idx, title ->
+-                Tab(
+-                    selected = selectedTab == idx,
+-                    onClick = { selectedTab = idx },
+-                    text = {
+-                        Text(
+-                            title,
+-                            maxLines = 1,
+-                            fontSize = 12.sp,
+-                            fontFamily = FontFamily.SansSerif,
+-                            color = if (selectedTab == idx) ElectricCyan() else SecondaryText()
+-                        )
+-                    }
+-                )
+-            }
+-        }
+-
+-        when (selectedTab) {
+-            0 -> DtcListContent(dtcCodes, emptyHint = "No Stored Diagnostic Trouble Codes Found")
+-            1 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    Button(
+-                        onClick = {
+-                            auxScanning = true
+-                            scope.launch {
+-                                viewModel?.scanPendingDtcsNow()
+-                                auxScanning = false
+-                            }
+-                        },
+-                        enabled = !auxScanning && viewModel != null,
+-                        colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
+-                        shape = RoundedCornerShape(6.dp)
+-                    ) {
+-                        Text("Scan Pending (07)", color = OnAccent(), fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                    }
+-                }
+-                DtcListContent(pendingCodes, emptyHint = "No Pending Codes · ECU monitors have not confirmed a fault yet")
+-            }
+-            2 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    Button(
+-                        onClick = {
+-                            auxScanning = true
+-                            scope.launch {
+-                                viewModel?.scanPermanentDtcsNow()
+-                                auxScanning = false
+-                            }
+-                        },
+-                        enabled = !auxScanning && viewModel != null,
+-                        colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
+-                        shape = RoundedCornerShape(6.dp)
+-                    ) {
+-                        Text("Scan Permanent (0A)", color = OnAccent(), fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                    }
+-                }
+-                DtcListContent(permanentCodes, emptyHint = "No Permanent Codes · These survive a Mode 04 clear until the ECU re-verifies the repair")
+-            }
+-            3 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    Button(
+-                        onClick = {
+-                            auxScanning = true
+-                            scope.launch {
+-                                viewModel?.readFreezeFrameNow()
+-                                auxScanning = false
+-                            }
+-                        },
+-                        enabled = !auxScanning && viewModel != null,
+-                        colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
+-                        shape = RoundedCornerShape(6.dp)
+-                    ) {
+-                        Text("Read Freeze Frame (02)", color = OnAccent(), fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                    }
+-                }
+-                if (freezeFrame == null || freezeFrame.items.isEmpty()) {
+-                    EmptyStateBox("No Freeze Frame Stored", "The ECU snapshots engine data when a fault is confirmed. None is currently stored.")
+-                } else {
+-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                        item {
+-                            Surface(
+-                                color = DeepShade(),
+-                                shape = RoundedCornerShape(10.dp),
+-                                border = BorderStroke(1.dp, AmberWarning())
+-                            ) {
+-                                Column(Modifier.fillMaxWidth().padding(12.dp)) {
+-                                    Text("FREEZE FRAME SNAPSHOT", color = AmberWarning(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                                    Spacer(Modifier.height(6.dp))
+-                                    freezeFrame.items.forEach {
+-                                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+-                                            Text(it.label, color = SecondaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
+-                                            Text(it.value, color = PrimaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
+-                                        }
+-                                    }
+-                                }
+-                            }
+-                        }
+-                    }
+-                }
+-            }
+-            4 -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    Button(
+-                        onClick = {
+-                            auxScanning = true
+-                            scope.launch {
+-                                viewModel?.readReadinessNow()
+-                                auxScanning = false
+-                            }
+-                        },
+-                        enabled = !auxScanning && viewModel != null,
+-                        colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
+-                        shape = RoundedCornerShape(6.dp)
+-                    ) {
+-                        Text("Read Readiness (0101)", color = OnAccent(), fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                    }
+-                }
+-                if (readiness == null) {
+-                    EmptyStateBox("Readiness Not Read", "Query the ECU to see MIL status and emissions monitor completion before an inspection.")
+-                } else {
+-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                        item {
+-                            Surface(
+-                                color = DeepShade(),
+-                                shape = RoundedCornerShape(10.dp),
+-                                border = BorderStroke(1.dp, if (readiness.milOn) CriticalRed() else TealAccent())
+-                            ) {
+-                                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+-                                        Text(
+-                                            if (readiness.milOn) "CHECK ENGINE LIGHT: ON" else "CHECK ENGINE LIGHT: OFF",
+-                                            color = if (readiness.milOn) CriticalRed() else TealAccent(),
+-                                            fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif
+-                                        )
+-                                        Text(
+-                                            "Stored codes: ${readiness.storedDtcCount}",
+-                                            color = SecondaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif
+-                                        )
+-                                    }
+-                                    Text(if (readiness.compressionIgnitionMonitors.isNotEmpty()) "DIESEL READINESS MONITORS" else "GASOLINE READINESS MONITORS",
+-                                        color = ElectricCyan(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                                    (readiness.sparkIgnitionMonitors + readiness.compressionIgnitionMonitors).forEach { m ->
+-                                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+-                                            Text(m.name, color = SecondaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
+-                                            Text(
+-                                                if (m.complete) "COMPLETE" else "NOT READY",
+-                                                color = if (m.complete) TealAccent() else AmberWarning(),
+-                                                fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif
+-                                            )
+-                                        }
+-                                    }
+-                                }
+-                            }
+-                        }
+-                        if (supportedPids.isNotEmpty()) {
+-                            item {
+-                                Surface(
+-                                    color = DeepShade(),
+-                                    shape = RoundedCornerShape(10.dp),
+-                                    border = BorderStroke(1.dp, DarkSurfaceElevated())
+-                                ) {
+-                                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
+-                                        Text("ECU SUPPORTED PIDs (${supportedPids.size} discovered)", color = ElectricCyan(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                                        Spacer(Modifier.height(4.dp))
+-                                        Text(
+-                                            supportedPids.sorted().joinToString(" "),
+-                                            color = SecondaryText(),
+-                                            fontSize = 11.sp,
+-                                            fontFamily = FontFamily.SansSerif
+-                                        )
+-                                    }
+-                                }
+-                            }
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    if (showClearConfirm) {
+-        AlertDialog(
+-            onDismissRequest = { showClearConfirm = false },
+-            title = { Text("Clear Fault Codes (Mode 04)?", fontFamily = FontFamily.SansSerif, color = PrimaryText()) },
+-            text = {
+-                Text(
+-                    "Warning: Clearing ECU codes resets emissions inspection readiness monitors and turns off the check engine light. If the physical fault is not repaired, the code will reoccur.",
+-                    fontFamily = FontFamily.SansSerif,
+-                    fontSize = 11.sp,
+-                    color = SecondaryText()
+-                )
+-            },
+-            confirmButton = {
+-                Button(
+-                    onClick = {
+-                        showClearConfirm = false
+-                        onClear()
+-                    },
+-                    colors = ButtonDefaults.buttonColors(containerColor = CriticalRed())
+-                ) {
+-                    Text("Confirm Clear", fontFamily = FontFamily.SansSerif, color = DarkBackground())
+-                }
+-            },
+-            dismissButton = {
+-                Button(
+-                    onClick = { showClearConfirm = false },
+-                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated())
+-                ) {
+-                    Text("Cancel", fontFamily = FontFamily.SansSerif, color = SecondaryText())
+-                }
+-            },
+-            containerColor = DeepShade()
+-        )
+-    }
+-}
+-
+-@Composable
+-private fun DtcListContent(dtcCodes: List<DtcItem>, emptyHint: String) {
+-    if (dtcCodes.isEmpty()) {
+-        EmptyStateBox("No Trouble Codes Found", emptyHint)
+-    } else {
+-        LazyColumn(
+-            modifier = Modifier.fillMaxWidth(),
+-            verticalArrangement = Arrangement.spacedBy(8.dp)
+-        ) {
+-            items(dtcCodes) { dtc ->
+-                Surface(
+-                    color = DeepShade(),
+-                    shape = RoundedCornerShape(10.dp),
+-                    border = BorderStroke(1.dp, if (dtc.severity == DtcSeverity.CRITICAL) CriticalRed() else AmberWarning())
+-                ) {
+-                    Column(
+-                        modifier = Modifier
+-                            .fillMaxWidth()
+-                            .padding(12.dp)
+-                    ) {
+-                        Row(
+-                            modifier = Modifier.fillMaxWidth(),
+-                            horizontalArrangement = Arrangement.SpaceBetween,
+-                            verticalAlignment = Alignment.CenterVertically
+-                        ) {
+-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                                Text(
+-                                    text = dtc.code,
+-                                    color = if (dtc.severity == DtcSeverity.CRITICAL) CriticalRed() else AmberWarning(),
+-                                    fontSize = 16.sp,
+-                                    fontWeight = FontWeight.SemiBold,
+-                                    fontFamily = FontFamily.SansSerif
+-                                )
+-                                Text(
+-                                    text = dtc.system,
+-                                    color = SecondaryText(),
+-                                    fontSize = 11.sp,
+-                                    fontFamily = FontFamily.SansSerif
+-                                )
+-                            }
+-
+-                            Text(
+-                                text = dtc.severity.name,
+-                                color = if (dtc.severity == DtcSeverity.CRITICAL) CriticalRed() else AmberWarning(),
+-                                fontSize = 12.sp,
+-                                fontWeight = FontWeight.Bold,
+-                                fontFamily = FontFamily.SansSerif,
+-                                modifier = Modifier
+-                                    .background(
+-                                        (if (dtc.severity == DtcSeverity.CRITICAL) CriticalRed() else AmberWarning()).copy(alpha = 0.15f),
+-                                        RoundedCornerShape(4.dp)
+-                                    )
+-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+-                            )
+-                        }
+-
+-                        Spacer(modifier = Modifier.height(6.dp))
+-                        Text(text = dtc.description, color = PrimaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Spacer(modifier = Modifier.height(4.dp))
+-                        Text(text = "Probable Cause: ${dtc.probableCause}", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun EmptyStateBox(title: String, subtitle: String) {
+-    Box(
+-        modifier = Modifier
+-            .fillMaxWidth()
+-            .heightIn(min = 160.dp)
+-            .background(DeepShade(), RoundedCornerShape(10.dp))
+-            .border(1.dp, DarkSurfaceElevated(), RoundedCornerShape(10.dp))
+-            .padding(20.dp),
+-        contentAlignment = Alignment.Center
+-    ) {
+-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+-            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = TealAccent(), modifier = Modifier.size(44.dp))
+-            Spacer(modifier = Modifier.height(10.dp))
+-            Text(title, color = PrimaryText(), fontWeight = FontWeight.Bold, fontSize = 14.sp, fontFamily = FontFamily.SansSerif)
+-            Spacer(modifier = Modifier.height(4.dp))
+-            Text(subtitle, color = SecondaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
+-        }
+-    }
+-}
+-
+-// =========================================================================
+-// SUB-VIEW: TRIP COMPUTER PAGE
+-// =========================================================================
+-@Composable
+-fun TripComputerPage(
+-    distanceKm: Double,
+-    durationSeconds: Long,
+-    maxSpeed: Int,
+-    avgSpeed: Int,
+-    currentSpeed: Int,
+-    speedUnit: String,
+-    currentLat: Double,
+-    currentLon: Double,
+-    onReset: () -> Unit,
+-    viewModel: ObdViewModel? = null
+-) {
+-    val hrs = durationSeconds / 3600
+-    val mins = (durationSeconds % 3600) / 60
+-    val secs = durationSeconds % 60
+-    val timeFormatted = String.format(Locale.US, "%02d:%02d:%02d", hrs, mins, secs)
+-
+-    val liveTelemetry = viewModel?.telemetry?.collectAsState()?.value
+-    val fuelUsedL = liveTelemetry?.fuelUsedLiters
+-    val instantEconomy = liveTelemetry?.fuelEconomyL100
+-    // Average economy for the trip = liters used / distance * 100
+-    val avgEconomy = if (fuelUsedL != null && distanceKm > 0.5) fuelUsedL / distanceKm * 100.0 else null
+-    // Range estimate from remaining tank fuel (62 L Sportage tank) and trip average
+-    val tankLiters = 62.0
+-    val rangeKm = if (avgEconomy != null && avgEconomy > 0.5 && liveTelemetry?.fuelLevelPct != null) {
+-        (tankLiters * liveTelemetry.fuelLevelPct / 100.0) / avgEconomy * 100.0
+-    } else null
+-
+-    val metrics = listOf(
+-        PanelReading("Distance", "%.1f".format(if (speedUnit == "mph") distanceKm * 0.621371 else distanceKm),
+-            if (speedUnit == "mph") "miles" else "km", ElectricCyan()),
+-        PanelReading("Elapsed time", timeFormatted, "hh:mm:ss"),
+-        PanelReading("Average speed", "$avgSpeed", speedUnit),
+-        PanelReading("Maximum speed", "$maxSpeed", speedUnit),
+-        PanelReading("Average economy", avgEconomy?.let { "%.1f".format(it) } ?: "--", "L/100 km"),
+-        PanelReading("Instant economy", instantEconomy?.let { "%.1f".format(it) } ?: "--", "L/100 km"),
+-        PanelReading("Fuel used", fuelUsedL?.let { "%.2f".format(it) } ?: "--", "liters"),
+-        PanelReading("Range estimate", rangeKm?.let { "%.0f".format(it) } ?: "--", "km to empty")
+-    )
+-    BoxWithConstraints(Modifier.fillMaxSize()) {
+-        val columns = if (maxWidth >= 700.dp) 4 else if (maxWidth < 380.dp && androidx.compose.ui.platform.LocalDensity.current.fontScale > 1.2f) 1 else 2
+-        Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+-                Text("Trip", Modifier.weight(1f), color = PrimaryText(), style = MaterialTheme.typography.titleLarge)
+-                FilledTonalButton(onClick = onReset, modifier = Modifier.heightIn(min = 48.dp)) {
+-                    Icon(Icons.Default.Refresh, null, Modifier.size(18.dp))
+-                    Spacer(Modifier.width(8.dp))
+-                    Text("Reset trip")
+-                }
+-            }
+-            androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+-                columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(columns),
+-                modifier = Modifier.fillMaxWidth().weight(1f),
+-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+-                verticalArrangement = Arrangement.spacedBy(12.dp)
+-            ) {
+-                items(metrics.size) { index -> MetricTile(metrics[index]) }
+-            }
+-            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+-                Icon(Icons.Default.MyLocation, null, Modifier.size(18.dp), tint = SecondaryText())
+-                Spacer(Modifier.width(8.dp))
+-                Text("Coordinates", Modifier.weight(1f), color = SecondaryText(), style = MaterialTheme.typography.labelMedium)
+-                Text("${"%.5f".format(currentLat)}, ${"%.5f".format(currentLon)}",
+-                    color = SecondaryText(), style = MaterialTheme.typography.labelMedium)
+-            }
+-        }
+-    }
+-}
+-
+-private data class PanelReading(val title: String, val value: String, val unit: String, val color: Color? = null)
+-
+ @Composable
+ private fun MetricTile(reading: PanelReading) {
+     Surface(color = DarkSurface(), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().height(120.dp)) {
+         Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.SpaceBetween) {
+-            Text(reading.title, color = SecondaryText(), style = MaterialTheme.typography.labelMedium,
++            Text(reading.label, color = SecondaryText(), style = MaterialTheme.typography.labelMedium,
+                 maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+-            Text(reading.value, color = reading.color ?: PrimaryText(), fontSize = if (reading.value.length > 6) 20.sp else 28.sp,
++            Text(reading.value, color = reading.color, fontSize = if (reading.value.length > 6) 20.sp else 28.sp,
+                 fontWeight = FontWeight.Medium, maxLines = 1)
+             Text(reading.unit, color = SecondaryText(), style = MaterialTheme.typography.labelMedium, maxLines = 1)
+         }
+     }
+ }
+ 
+-// =========================================================================
+-// SUB-VIEW: MEDIA & RADIO PAGE
+-// =========================================================================
+-@Composable
+-fun MediaRadioPage(
+-    radioFreq: Float,
+-    onFreqChange: (Float) -> Unit,
+-    radioStationName: String,
+-    onStationChange: (String, Float) -> Unit,
+-    isMediaPlaying: Boolean,
+-    onTogglePlayPause: () -> Unit,
+-    onPrev: () -> Unit,
+-    onNext: () -> Unit,
+-    onLaunchNativeRadio: () -> Unit,
+-    onLaunchLocalMusic: () -> Unit
+-) {
+-    val context = LocalContext.current
+-    val controller = remember { NowPlayingController(context) }
+-    val nowPlaying by controller.state.collectAsState()
+-    var showPicker by remember { mutableStateOf(false) }
+-    var pickerApps by remember { mutableStateOf<List<MediaAppInfo>>(emptyList()) }
+-    var radioApps by remember { mutableStateOf<List<MediaAppInfo>>(emptyList()) }
+-
+-    // Connect to the saved music app (or the first MediaBrowserService found) while
+-    // this page is open, so now-playing info and controls reflect the real session.
+-    DisposableEffect(Unit) {
+-        controller.connect(chosenMusicApp(context))
+-        radioApps = MediaApps.radioApps(context)
+-        onDispose { controller.disconnect() }
+-    }
+-    // Remember the last manually chosen app so the connection follows it next time.
+-    fun pickApp(app: MediaAppInfo) {
+-        saveChosenMusicApp(context, app.packageName)
+-        if (app.browseComponent != null) {
+-            controller.connect(app.packageName)
+-        } else {
+-            controller.disconnect()
+-            app.launchIntent?.let { runCatching { context.startActivity(it) } }
+-        }
+-    }
+-
+-    Column(
+-        modifier = Modifier
+-            .fillMaxSize()
+-            .verticalScroll(rememberScrollState())
+-            .padding(12.dp),
+-        verticalArrangement = Arrangement.spacedBy(10.dp)
+-    ) {
+-        Text("Media", color = PrimaryText(), style = MaterialTheme.typography.titleLarge)
+-
+-        // ---- Now playing + music controls ----
+-        Surface(
+-            modifier = Modifier.fillMaxWidth().testTag("media_now_playing"),
+-            color = DarkBackground(), shape = RoundedCornerShape(12.dp),
+-            border = BorderStroke(1.dp, DarkSurfaceElevated())
+-        ) {
+-            Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+-                Text("NOW PLAYING", color = SecondaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+-                if (nowPlaying != null) {
+-                    Text(nowPlaying?.title ?: "Unknown track", color = PrimaryText(), fontSize = 22.sp,
+-                        fontWeight = FontWeight.Medium, maxLines = 1,
+-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+-                    Text(
+-                        (nowPlaying?.artist ?: "") + "  ·  " + (nowPlaying?.appName ?: ""),
+-                        color = SecondaryText(), style = MaterialTheme.typography.labelMedium, maxLines = 1,
+-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+-                    )
+-                } else {
+-                    Text("No connected music app", color = PrimaryText(), fontSize = 18.sp)
+-                    Text("Controls send standard media keys to the active player",
+-                        color = SecondaryText(), style = MaterialTheme.typography.labelMedium)
+-                }
+-                Spacer(Modifier.height(12.dp))
+-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+-                    IconButton(
+-                        onClick = { if (controller.isConnected) controller.previous() else onPrev() },
+-                        modifier = Modifier.size(56.dp).background(DarkSurfaceElevated(), CircleShape)
+-                            .testTag("media_prev")
+-                    ) { Icon(Icons.Default.SkipPrevious, "Previous track", tint = PrimaryText()) }
+-                    IconButton(
+-                        onClick = { if (controller.isConnected) controller.playPause() else onTogglePlayPause() },
+-                        modifier = Modifier.size(64.dp).background(ElectricCyan(), CircleShape)
+-                            .testTag("media_play_pause")
+-                    ) {
+-                        Icon(
+-                            if (nowPlaying?.isPlaying == true) Icons.Default.Pause else Icons.Default.PlayArrow,
+-                            if (nowPlaying?.isPlaying == true) "Pause" else "Play",
+-                            tint = OnAccent()
+-                        )
+-                    }
+-                    IconButton(
+-                        onClick = { if (controller.isConnected) controller.next() else onNext() },
+-                        modifier = Modifier.size(56.dp).background(DarkSurfaceElevated(), CircleShape)
+-                            .testTag("media_next")
+-                    ) { Icon(Icons.Default.SkipNext, "Next track", tint = PrimaryText()) }
+-                }
+-                Spacer(Modifier.height(10.dp))
+-                Button(
+-                    onClick = {
+-                        pickerApps = MediaApps.musicApps(context)
+-                        showPicker = true
+-                    },
+-                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                    shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()
+-                ) {
+-                    Icon(Icons.Default.Apps, contentDescription = null, tint = TealAccent(), modifier = Modifier.size(16.dp))
+-                    Spacer(Modifier.width(6.dp))
+-                    Text("Choose music app", color = PrimaryText(), fontSize = 12.sp)
+-                }
+-            }
+-        }
+-
+-        // ---- Radio ----
+-        Surface(
+-            modifier = Modifier.fillMaxWidth(), color = DarkBackground(), shape = RoundedCornerShape(12.dp),
+-            border = BorderStroke(1.dp, DarkSurfaceElevated())
+-        ) {
+-            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+-                Text("RADIO", color = SecondaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+-                Spacer(Modifier.height(4.dp))
+-                Text(
+-                    "The FM tuner is controlled by the head unit's own radio hardware and app - this " +
+-                        "dashboard cannot tune it over generic OBD/Android. Open the radio app below to change station.",
+-                    color = SecondaryText(), style = MaterialTheme.typography.labelMedium
+-                )
+-                Spacer(Modifier.height(10.dp))
+-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    Button(
+-                        onClick = onLaunchNativeRadio,
+-                        modifier = Modifier.weight(1f),
+-                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                        shape = RoundedCornerShape(8.dp)
+-                    ) {
+-                        Icon(Icons.Default.Radio, contentDescription = null, tint = ElectricCyan(), modifier = Modifier.size(16.dp))
+-                        Spacer(modifier = Modifier.width(6.dp))
+-                        Text("Open Head Unit Radio App", color = PrimaryText(), fontSize = 11.sp)
+-                    }
+-                    Button(
+-                        onClick = onLaunchLocalMusic,
+-                        modifier = Modifier.weight(1f),
+-                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                        shape = RoundedCornerShape(8.dp)
+-                    ) {
+-                        Icon(Icons.Default.MusicNote, contentDescription = null, tint = TealAccent(), modifier = Modifier.size(16.dp))
+-                        Spacer(modifier = Modifier.width(6.dp))
+-                        Text("Open Local Music Player", color = PrimaryText(), fontSize = 11.sp)
+-                    }
+-                }
+-                if (radioApps.isNotEmpty()) {
+-                    Spacer(Modifier.height(10.dp))
+-                    Text("Radio apps on this device", color = PrimaryText(), style = MaterialTheme.typography.labelLarge)
+-                    radioApps.forEach { app ->
+-                        TextButton(onClick = { app.launchIntent?.let { runCatching { context.startActivity(it) } } }) {
+-                            Text(app.label, color = TealAccent(), fontSize = 12.sp)
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    if (showPicker) {
+-        AlertDialog(
+-            onDismissRequest = { showPicker = false },
+-            confirmButton = {
+-                TextButton(onClick = { showPicker = false }) { Text("Close", color = SecondaryText()) }
+-            },
+-            title = { Text("Choose music app", color = PrimaryText()) },
+-            text = {
+-                Column(Modifier.verticalScroll(rememberScrollState())) {
+-                    if (pickerApps.isEmpty()) {
+-                        Text("No music apps found on this device.", color = SecondaryText())
+-                    }
+-                    pickerApps.forEach { app ->
+-                        TextButton(onClick = { pickApp(app); showPicker = false }) {
+-                            Column {
+-                                Text(app.label, color = PrimaryText())
+-                                Text(
+-                                    if (app.browseComponent != null) "Shows now-playing info" else "Launch only",
+-                                    color = SecondaryText(), style = MaterialTheme.typography.labelSmall
+-                                )
+-                            }
+-                        }
+-                    }
+-                }
+-            }
+-        )
+-    }
+-}
+-
+-// =========================================================================
+-// SUB-VIEW: SETTINGS & DEFAULT LAUNCHER ONBOARDING PAGE
+-// =========================================================================
+-@Composable
+-fun SettingsPage(
+-    speedUnit: String,
+-    onToggleSpeedUnit: () -> Unit,
+-    onSetDefaultLauncher: () -> Unit,
+-    isDemoMode: Boolean,
+-    onToggleDemoMode: (Boolean) -> Unit,
+-    onOpenBluetoothSettings: () -> Unit,
+-    isPollingPaused: Boolean = false,
+-    onTogglePausePolling: () -> Unit = {},
+-    onOpenAppDrawer: () -> Unit = {},
+-    viewModel: ObdViewModel? = null,
+-    autoNightDim: Boolean = true,
+-    nightDimLevel: Float = 0.55f,
+-    onSetAutoNightDim: (Boolean) -> Unit = {},
+-    onSetNightDimLevel: (Float) -> Unit = {},
+-    themeId: String = "cockpit-dark",
+-    accentOverride: String? = null,
+-    onSetThemeId: (String) -> Unit = {},
+-    onSetAccentOverride: (String?) -> Unit = {},
+-    onOpenPrivacyPolicy: () -> Unit = {}
+-) {
+-    val context = LocalContext.current
+-    var thresholds by remember { mutableStateOf(viewModel?.alertThresholds() ?: AlertThresholds()) }
+-    var csvLogging by remember { mutableStateOf(false) }
+-    csvLogging = viewModel?.isCsvLogging?.collectAsState()?.value ?: false
+-
+-    Column(
+-        modifier = Modifier
+-            .fillMaxSize()
+-            .verticalScroll(rememberScrollState())
+-            .padding(12.dp),
+-        verticalArrangement = Arrangement.spacedBy(10.dp)
+-    ) {
+-        Text("Settings", color = PrimaryText(), style = MaterialTheme.typography.titleLarge)
+-
+-        // 0. Theme & Colors Card: restyles the whole app instantly, persisted across restarts.
+-        ThemeCustomizationCard(themeId, accentOverride, onSetThemeId, onSetAccentOverride, onOpenPrivacyPolicy)
+-
+-        // 1. Set as Default Launcher Card (Non-Negotiable P0 Launcher Requirement)
+-        Surface(
+-            modifier = Modifier.fillMaxWidth(),
+-            color = DarkBackground(),
+-            shape = RoundedCornerShape(10.dp),
+-            border = BorderStroke(1.dp, ElectricCyan().copy(alpha = 0.5f))
+-        ) {
+-            Row(
+-                modifier = Modifier
+-                    .fillMaxWidth()
+-                    .padding(14.dp),
+-                horizontalArrangement = Arrangement.SpaceBetween,
+-                verticalAlignment = Alignment.CenterVertically
+-            ) {
+-                Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
+-                    Text("SET AS DEFAULT ANDROID HOME LAUNCHER", color = ElectricCyan(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                    Spacer(modifier = Modifier.height(2.dp))
+-                    Text(
+-                        "Makes Sportage OBD the permanent car dashboard. Booting the head unit or pressing Home returns here.",
+-                        color = SecondaryText(),
+-                        fontSize = 12.sp,
+-                        fontFamily = FontFamily.SansSerif
+-                    )
+-                }
+-
+-                Button(
+-                    modifier = Modifier.widthIn(min = 128.dp).heightIn(min = 48.dp),
+-                    onClick = onSetDefaultLauncher,
+-                    colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan()),
+-                    shape = RoundedCornerShape(6.dp)
+-                ) {
+-                    Text("Set Default Home", color = OnAccent(), fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                }
+-            }
+-        }
+-
+-        // 2. Units & Telemetry Settings Card
+-        Surface(
+-            modifier = Modifier.fillMaxWidth(),
+-            color = DarkBackground(),
+-            shape = RoundedCornerShape(10.dp),
+-            border = BorderStroke(1.dp, DarkSurfaceElevated())
+-        ) {
+-            Column(
+-                modifier = Modifier
+-                    .fillMaxWidth()
+-                    .padding(14.dp),
+-                verticalArrangement = Arrangement.spacedBy(12.dp)
+-            ) {
+-                // Speed Unit
+-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f).padding(end = 16.dp)) {
+-                        Text("Speed & Distance Units", color = PrimaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Text("Current: $speedUnit", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-
+-                    Button(
+-                        modifier = Modifier.widthIn(min = 128.dp).heightIn(min = 48.dp),
+-                        onClick = onToggleSpeedUnit,
+-                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                        shape = RoundedCornerShape(6.dp)
+-                    ) {
+-                        Text(text = if (speedUnit == "km/h") "Switch to MPH" else "Switch to KM/H", color = ElectricCyan(), fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                    }
+-                }
+-
+-                // Installed Apps Drawer
+-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f).padding(end = 16.dp)) {
+-                        Text("Installed App Drawer", color = PrimaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Text("Browse and launch all head unit installed apps", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-
+-                    Button(
+-                        modifier = Modifier.widthIn(min = 128.dp).heightIn(min = 48.dp),
+-                        onClick = onOpenAppDrawer,
+-                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                        shape = RoundedCornerShape(6.dp)
+-                    ) {
+-                        Icon(Icons.Default.Apps, contentDescription = null, tint = ElectricCyan(), modifier = Modifier.size(13.dp))
+-                        Spacer(modifier = Modifier.width(4.dp))
+-                        Text("Open Apps", color = ElectricCyan(), fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                    }
+-                }
+-
+-                // Pause OBD Polling Toggle (Ignition Off / Save Battery)
+-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f).padding(end = 16.dp)) {
+-                        Text("Pause OBD Polling (Engine Off)", color = PrimaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Text("Stop Bluetooth querying when car engine is switched off", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-
+-                    Switch(
+-                        checked = isPollingPaused,
+-                        onCheckedChange = { onTogglePausePolling() },
+-                        colors = SwitchDefaults.colors(checkedThumbColor = AmberWarning(), checkedTrackColor = AmberWarning().copy(alpha = 0.4f))
+-                    )
+-                }
+-
+-                // Bench Test / Demo Telemetry
+-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f).padding(end = 16.dp)) {
+-                        Text("Bench Test / Demo Simulation", color = PrimaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Text("Simulates live RPM, speed and sensors for indoor testing without car", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-
+-                    Switch(
+-                        checked = isDemoMode,
+-                        onCheckedChange = onToggleDemoMode,
+-                        colors = SwitchDefaults.colors(checkedThumbColor = ElectricCyan(), checkedTrackColor = ElectricCyan().copy(alpha = 0.4f))
+-                    )
+-                }
+-
+-                // Android Bluetooth Settings Shortcut
+-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f).padding(end = 16.dp)) {
+-                        Text("Android Bluetooth System Settings", color = PrimaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Text("Pair new ELM327 adapters or view system devices", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-
+-                    Button(
+-                        modifier = Modifier.widthIn(min = 128.dp).heightIn(min = 48.dp),
+-                        onClick = onOpenBluetoothSettings,
+-                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                        shape = RoundedCornerShape(6.dp)
+-                    ) {
+-                        Text("Open Settings", color = SecondaryText(), fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                    }
+-                }
+-            }
+-        }
+-
+-        // 3. Warning Thresholds Card
+-        Surface(
+-            modifier = Modifier.fillMaxWidth(),
+-            color = DarkBackground(),
+-            shape = RoundedCornerShape(10.dp),
+-            border = BorderStroke(1.dp, AmberWarning().copy(alpha = 0.5f))
+-        ) {
+-            Column(
+-                modifier = Modifier
+-                    .fillMaxWidth()
+-                    .padding(14.dp),
+-                verticalArrangement = Arrangement.spacedBy(10.dp)
+-            ) {
+-                Text("VEHICLE WARNING THRESHOLDS", color = AmberWarning(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                Text("Audible beep + red banner when a value crosses its limit", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-
+-                ThresholdStepper(
+-                    label = "Coolant Overheat Limit",
+-                    value = "${thresholds.coolantMaxC}°C",
+-                    onMinus = { thresholds = thresholds.copy(coolantMaxC = (thresholds.coolantMaxC - 5).coerceAtLeast(90)); viewModel?.updateAlertThresholds(thresholds) },
+-                    onPlus = { thresholds = thresholds.copy(coolantMaxC = (thresholds.coolantMaxC + 5).coerceAtMost(130)); viewModel?.updateAlertThresholds(thresholds) }
+-                )
+-                ThresholdStepper(
+-                    label = "Battery Low Limit",
+-                    value = "%.1fV".format(thresholds.batteryMinV),
+-                    onMinus = { thresholds = thresholds.copy(batteryMinV = (thresholds.batteryMinV - 0.5f).coerceAtLeast(9f)); viewModel?.updateAlertThresholds(thresholds) },
+-                    onPlus = { thresholds = thresholds.copy(batteryMinV = (thresholds.batteryMinV + 0.5f).coerceAtMost(14f)); viewModel?.updateAlertThresholds(thresholds) }
+-                )
+-                ThresholdStepper(
+-                    label = "RPM Redline Limit",
+-                    value = "${thresholds.rpmMax}",
+-                    onMinus = { thresholds = thresholds.copy(rpmMax = (thresholds.rpmMax - 500).coerceAtLeast(3000)); viewModel?.updateAlertThresholds(thresholds) },
+-                    onPlus = { thresholds = thresholds.copy(rpmMax = (thresholds.rpmMax + 500).coerceAtMost(7500)); viewModel?.updateAlertThresholds(thresholds) }
+-                )
+-                ThresholdStepper(
+-                    label = "Speed Limit",
+-                    value = "${thresholds.speedMaxKmh} km/h",
+-                    onMinus = { thresholds = thresholds.copy(speedMaxKmh = (thresholds.speedMaxKmh - 10).coerceAtLeast(60)); viewModel?.updateAlertThresholds(thresholds) },
+-                    onPlus = { thresholds = thresholds.copy(speedMaxKmh = (thresholds.speedMaxKmh + 10).coerceAtMost(220)); viewModel?.updateAlertThresholds(thresholds) }
+-                )
+-
+-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f).padding(end = 16.dp)) {
+-                        Text("Audible Warning Beeps", color = PrimaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Text("Play a tone when a threshold is crossed", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-                    Switch(
+-                        checked = thresholds.audibleAlerts,
+-                        onCheckedChange = {
+-                            thresholds = thresholds.copy(audibleAlerts = it)
+-                            viewModel?.updateAlertThresholds(thresholds)
+-                        },
+-                        colors = SwitchDefaults.colors(checkedThumbColor = AmberWarning(), checkedTrackColor = AmberWarning().copy(alpha = 0.4f))
+-                    )
+-                }
+-            }
+-        }
+-
+-        // 4. CSV Data Logging Card
+-        Surface(
+-            modifier = Modifier.fillMaxWidth(),
+-            color = DarkBackground(),
+-            shape = RoundedCornerShape(10.dp),
+-            border = BorderStroke(1.dp, TealAccent().copy(alpha = 0.5f))
+-        ) {
+-            Column(
+-                modifier = Modifier
+-                    .fillMaxWidth()
+-                    .padding(14.dp),
+-                verticalArrangement = Arrangement.spacedBy(10.dp)
+-            ) {
+-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f).padding(end = 16.dp)) {
+-                        Text("CSV TELEMETRY LOGGING", color = TealAccent(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Text("Record every sensor sample to a CSV file on this drive", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-
+-                    Switch(
+-                        checked = csvLogging,
+-                        onCheckedChange = { enable ->
+-                            if (enable) viewModel?.startCsvLogging() else viewModel?.stopCsvLogging()
+-                        },
+-                        colors = SwitchDefaults.colors(checkedThumbColor = TealAccent(), checkedTrackColor = TealAccent().copy(alpha = 0.4f))
+-                    )
+-                }
+-
+-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f).padding(end = 16.dp)) {
+-                        Text("Auto-Start With Connection", color = PrimaryText(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Text("Begin logging every time the adapter connects", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-                    var csvAuto by remember { mutableStateOf(viewModel?.csvAutostart() ?: false) }
+-                    Switch(
+-                        checked = csvAuto,
+-                        onCheckedChange = {
+-                            csvAuto = it
+-                            viewModel?.setCsvAutostart(it)
+-                        },
+-                        colors = SwitchDefaults.colors(checkedThumbColor = TealAccent(), checkedTrackColor = TealAccent().copy(alpha = 0.4f))
+-                    )
+-                }
+-
+-                Button(
+-                    modifier = Modifier.widthIn(min = 128.dp).heightIn(min = 48.dp),
+-                    onClick = {
+-                        val file = viewModel?.csvLogFile()
+-                        if (file != null && file.exists()) {
+-                            try {
+-                                val uri = androidx.core.content.FileProvider.getUriForFile(
+-                                    context,
+-                                    context.packageName + ".fileprovider",
+-                                    file
+-                                )
+-                                val send = Intent(Intent.ACTION_SEND).apply {
+-                                    type = "text/csv"
+-                                    putExtra(Intent.EXTRA_STREAM, uri)
+-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+-                                }
+-                                context.startActivity(Intent.createChooser(send, "Share OBD Log").apply {
+-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+-                                })
+-                            } catch (e: Exception) {
+-                                Toast.makeText(context, "Could not share log: ${e.message}", Toast.LENGTH_SHORT).show()
+-                            }
+-                        } else {
+-                            Toast.makeText(context, "No active log file. Start logging first.", Toast.LENGTH_SHORT).show()
+-                        }
+-                    },
+-                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                    shape = RoundedCornerShape(6.dp)
+-                ) {
+-                    Icon(Icons.Default.Share, contentDescription = null, tint = TealAccent(), modifier = Modifier.size(13.dp))
+-                    Spacer(modifier = Modifier.width(4.dp))
+-                    Text("Share Current Log", color = TealAccent(), fontFamily = FontFamily.SansSerif, fontSize = 11.sp)
+-                }
+-            }
+-        }
+-
+-        // 5. Night Dimming Card
+-        Surface(
+-            modifier = Modifier.fillMaxWidth(),
+-            color = DarkBackground(),
+-            shape = RoundedCornerShape(10.dp),
+-            border = BorderStroke(1.dp, ElectricCyan().copy(alpha = 0.5f))
+-        ) {
+-            Column(
+-                modifier = Modifier
+-                    .fillMaxWidth()
+-                    .padding(14.dp),
+-                verticalArrangement = Arrangement.spacedBy(10.dp)
+-            ) {
+-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-                    Column(Modifier.weight(1f).padding(end = 16.dp)) {
+-                        Text("AUTO NIGHT DIMMING", color = ElectricCyan(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                        Text("Dim the screen automatically after dark (follows system day/night)", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-                    Switch(
+-                        checked = autoNightDim,
+-                        onCheckedChange = onSetAutoNightDim,
+-                        colors = SwitchDefaults.colors(checkedThumbColor = ElectricCyan(), checkedTrackColor = ElectricCyan().copy(alpha = 0.4f))
+-                    )
+-                }
+-
+-                if (autoNightDim) {
+-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+-                        Text("BRIGHTNESS", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                        Slider(
+-                            value = 1f - nightDimLevel,
+-                            onValueChange = { onSetNightDimLevel(1f - it) },
+-                            modifier = Modifier.weight(1f),
+-                            colors = SliderDefaults.colors(thumbColor = ElectricCyan(), activeTrackColor = ElectricCyan().copy(alpha = 0.5f))
+-                        )
+-                        Text("${((1f - nightDimLevel) * 100).toInt()}%", color = PrimaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-                    }
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun ThemeCustomizationCard(
+-    themeId: String,
+-    accentOverride: String?,
+-    onSetThemeId: (String) -> Unit,
+-    onSetAccentOverride: (String?) -> Unit,
+-    onOpenPrivacyPolicy: () -> Unit
+-) {
+-    val selected = remember(themeId) { com.sportage.obd.ui.theme.CockpitThemes.byId(themeId) }
+-    Surface(
+-        modifier = Modifier.fillMaxWidth().testTag("theme_card"),
+-        color = DarkBackground(),
+-        shape = RoundedCornerShape(10.dp),
+-        border = BorderStroke(1.dp, ElectricCyan().copy(alpha = 0.5f))
+-    ) {
+-        Column(
+-            modifier = Modifier.fillMaxWidth().padding(14.dp),
+-            verticalArrangement = Arrangement.spacedBy(12.dp)
+-        ) {
+-            Column {
+-                Text("THEME & COLORS", color = ElectricCyan(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-                Text("Restyle the whole app instantly · ${selected.title}", color = SecondaryText(), fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+-            }
+-
+-            HorizontalDivider(color = DarkSurfaceElevated())
+-
+-            ListItem(
+-                headlineContent = { Text("Privacy Policy", color = PrimaryText(), fontWeight = FontWeight.Medium) },
+-                supportingContent = { Text("View our privacy policy and data practices", color = SecondaryText()) },
+-                leadingContent = {
+-                    Icon(
+-                        Icons.Default.PrivacyTip,
+-                        contentDescription = null,
+-                        tint = ElectricCyan(),
+-                        modifier = Modifier.size(24.dp)
+-                    )
+-                },
+-                modifier = Modifier
+-                    .fillMaxWidth()
+-                    .clickable { onOpenPrivacyPolicy() },
+-                colors = ListItemDefaults.colors(containerColor = DarkSurface())
+-            )
+-
+-            // Full-app theme presets.
+-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                com.sportage.obd.ui.theme.CockpitThemes.presets.forEach { preset ->
+-                    val isSel = preset.id == themeId
+-                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+-                        Box(
+-                            modifier = Modifier
+-                                .testTag("theme_preset_${preset.id}")
+-                                .size(52.dp)
+-                                .border(
+-                                    BorderStroke(if (isSel) 2.dp else 1.dp, if (isSel) ElectricCyan() else DarkSurfaceElevated()),
+-                                    RoundedCornerShape(10.dp)
+-                                )
+-                                .background(preset.colors.background, RoundedCornerShape(10.dp))
+-                                .clickable { onSetThemeId(preset.id) },
+-                            contentAlignment = Alignment.Center
+-                        ) {
+-                            Box(
+-                                Modifier.size(22.dp)
+-                                    .background(preset.colors.accent, CircleShape)
+-                                    .border(BorderStroke(2.dp, preset.colors.surface), CircleShape)
+-                            )
+-                        }
+-                        Text(preset.title, fontSize = 10.sp, maxLines = 1, color = if (isSel) ElectricCyan() else SecondaryText())
+-                    }
+-                }
+-            }
+-
+-            // Accent color layered on top of the chosen preset.
+-            Text("ACCENT COLOR", color = SecondaryText(), fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                // "Preset default" clears any override.
+-                Box(
+-                    modifier = Modifier
+-                        .testTag("accent_default")
+-                        .size(36.dp)
+-                        .border(
+-                            BorderStroke(if (accentOverride == null) 2.dp else 1.dp, if (accentOverride == null) ElectricCyan() else DarkSurfaceElevated()),
+-                            CircleShape
+-                        )
+-                        .background(DarkSurfaceElevated(), CircleShape)
+-                        .clickable { onSetAccentOverride(null) },
+-                    contentAlignment = Alignment.Center
+-                ) { Text("A", color = ElectricCyan(), fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+-                com.sportage.obd.ui.theme.CockpitThemes.accentChoices.forEach { accent ->
+-                    val hex = "FF%06X".format(accent.toArgb() and 0xFFFFFF)
+-                    val isSel = accentOverride != null && com.sportage.obd.ui.theme.CockpitThemes.parseAccent(accentOverride) == accent
+-                    Box(
+-                        modifier = Modifier
+-                            .testTag("accent_$hex")
+-                            .size(36.dp)
+-                            .border(
+-                                BorderStroke(if (isSel) 2.dp else 1.dp, if (isSel) ElectricCyan() else DarkSurfaceElevated()),
+-                                CircleShape
+-                            )
+-                            .background(accent, CircleShape)
+-                            .clickable { onSetAccentOverride(hex) }
+-                    )
+-                }
+-            }
+-            Text("Tap a color to override the accent everywhere; A restores the preset default.", color = SecondaryText(), fontSize = 11.sp, fontFamily = FontFamily.SansSerif)
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun ThresholdStepper(
+-    label: String,
+-    value: String,
+-    onMinus: () -> Unit,
+-    onPlus: () -> Unit
+-) {
+-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+-        Text(label, modifier = Modifier.weight(1f).padding(end = 12.dp), color = PrimaryText(), fontSize = 12.sp, fontWeight = FontWeight.Medium, fontFamily = FontFamily.SansSerif)
+-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+-            Button(
+-                onClick = onMinus,
+-                colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                shape = RoundedCornerShape(4.dp),
+-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+-            ) {
+-                Text("-", color = AmberWarning(), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+-            }
+-            Text(value, color = AmberWarning(), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif)
+-            Button(
+-                onClick = onPlus,
+-                colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated()),
+-                shape = RoundedCornerShape(4.dp),
+-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+-            ) {
+-                Text("+", color = AmberWarning(), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+-            }
+-        }
++private fun openPhoneDialer(context: Context) {
++    try {
++        val intent = Intent(Intent.ACTION_DIAL)
++        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        context.startActivity(intent)
++    } catch (_: Exception) {
++        Toast.makeText(context, "No phone dialer available", Toast.LENGTH_SHORT).show()
+     }
+ }
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/CockpitComponents.kt b/android/app/src/main/java/com/sportage/obd/ui/CockpitComponents.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/CockpitComponents.kt	2026-11-07 16:35:35.202057777 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/CockpitComponents.kt	2026-11-07 16:46:48.643202913 +0000
+@@ -214,3 +214,114 @@
+         }
+     }
+ }
++
++/**
++ * Combined analog dial: outer arc and long needle for speed, inner arc and short
++ * needle for engine RPM. Replaces the separate digital speed/RPM tiles.
++ */
++@Composable
++private fun CockpitDial(speed: Int?, speedUnit: String, rpm: Int?, onToggleSpeedUnit: () -> Unit, modifier: Modifier = Modifier) {
++    val speedColor = ElectricCyan()
++    val rpmColor = WarningAmber()
++    val trackColor = DarkSurfaceElevated()
++    val needleColor = PrimaryText()
++    val speedValue = speed?.toFloat() ?: 0f
++    val rpmValue = rpm?.toFloat() ?: 0f
++    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
++        Canvas(Modifier.fillMaxWidth().height(210.dp)) {
++            val stroke = 10.dp.toPx()
++            val rpmStroke = 5.dp.toPx()
++            val inset = stroke / 2 + 2.dp.toPx()
++            val diameter = minOf(size.width, size.height) - inset * 2
++            val arcSize = Size(diameter, diameter)
++            val topLeft = Offset((size.width - diameter) / 2, inset)
++            val sweep = 240f
++            val start = 150f
++            drawArc(color = trackColor, startAngle = start, sweepAngle = sweep, useCenter = false,
++                topLeft = topLeft, size = arcSize, style = Stroke(width = stroke, cap = StrokeCap.Round))
++            val speedFrac = (speedValue / 220f).coerceIn(0f, 1f)
++            drawArc(color = speedColor, startAngle = start, sweepAngle = sweep * speedFrac, useCenter = false,
++                topLeft = topLeft, size = arcSize, style = Stroke(width = stroke, cap = StrokeCap.Round))
++            val innerInset = inset + stroke + 8.dp.toPx()
++            val innerDiameter = diameter - (innerInset - inset) * 2
++            val innerSize = Size(innerDiameter, innerDiameter)
++            val innerTopLeft = Offset((size.width - innerDiameter) / 2, innerInset)
++            drawArc(color = trackColor, startAngle = start, sweepAngle = sweep, useCenter = false,
++                topLeft = innerTopLeft, size = innerSize, style = Stroke(width = rpmStroke, cap = StrokeCap.Round))
++            val rpmFrac = (rpmValue / 7000f).coerceIn(0f, 1f)
++            drawArc(color = rpmColor, startAngle = start, sweepAngle = sweep * rpmFrac, useCenter = false,
++                topLeft = innerTopLeft, size = innerSize, style = Stroke(width = rpmStroke, cap = StrokeCap.Round))
++            val centerX = size.width / 2
++            val centerY = arcSize.height / 2 + inset
++            fun angle(frac: Float) = Math.toRadians((start + sweep * frac).toDouble())
++            val speedAngle = angle(speedFrac)
++            val speedLen = arcSize.width / 2 - stroke
++            drawLine(needleColor, Offset(centerX, centerY),
++                Offset(centerX + (speedLen * Math.cos(speedAngle)).toFloat(),
++                    centerY + (speedLen * Math.sin(speedAngle)).toFloat()),
++                strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
++            val rpmAngle = angle(rpmFrac)
++            val rpmLen = innerSize.width / 2
++            drawLine(rpmColor, Offset(centerX, centerY),
++                Offset(centerX + (rpmLen * Math.cos(rpmAngle)).toFloat(),
++                    centerY + (rpmLen * Math.sin(rpmAngle)).toFloat()),
++                strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
++            drawCircle(needleColor, radius = 4.dp.toPx(), center = Offset(centerX, centerY))
++        }
++        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
++            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
++            Text("${speed ?: "--"} $speedUnit", color = PrimaryText(), fontSize = 20.sp, fontWeight = FontWeight.Medium,
++                modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
++                maxLines = 1)
++            Text("${rpm ?: "--"} rpm", color = rpmColor, fontSize = 16.sp, maxLines = 1)
++        }
++        TextButton(onClick = onToggleSpeedUnit, modifier = Modifier.heightIn(min = 36.dp)) {
++            Text("Switch to ${if (speedUnit == "km/h") "mph" else "km/h"}", color = SecondaryText(),
++                style = MaterialTheme.typography.labelSmall)
++        }
++    }
++}
++
++@Composable
++private fun CockpitSpeed(speed: Int?, unit: String, toggle: () -> Unit, size: Int) {
++    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
++        BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
++            val reading = speed?.toString() ?: "--"
++            val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale
++            var fittedSize by remember(reading.length, maxWidth, fontScale, size) {
++                mutableFloatStateOf(size.toFloat())
++            }
++            Text(reading, color = PrimaryText(), fontSize = fittedSize.sp,
++                lineHeight = (fittedSize * 1.1f).sp,
++                fontWeight = FontWeight.Light, style = TextStyle(fontFeatureSettings = "tnum", letterSpacing = (-2).sp),
++                maxLines = 1,
++                onTextLayout = { result ->
++                    if (result.didOverflowWidth && fittedSize > 20f) fittedSize = (fittedSize * 0.9f).coerceAtLeast(20f)
++                })
++        }
++        TextButton(onClick = toggle, modifier = Modifier.heightIn(min = 48.dp)) {
++            Text(unit, color = ElectricCyan(), style = MaterialTheme.typography.labelLarge)
++        }
++    }
++}
++
++@Composable
++private fun CockpitRpm(rpm: Int?) {
++    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
++        Text("Engine speed", style = MaterialTheme.typography.labelMedium, color = SecondaryText())
++        Text("${rpm?.toString() ?: "--"} rpm", style = MaterialTheme.typography.labelLarge, color = PrimaryText())
++        LinearProgressIndicator(
++            progress = { ((rpm ?: 0) / 7000f).coerceIn(0f, 1f) },
++            modifier = Modifier.fillMaxWidth().height(4.dp),
++            color = if ((rpm ?: 0) > 6500) CriticalRed() else ElectricCyan(), trackColor = DarkSurfaceElevated())
++    }
++}
++
++@Composable
++private fun CockpitReading(label: String, value: String, modifier: Modifier, color: androidx.compose.ui.graphics.Color = PrimaryText()) {
++    Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
++        Text(label, style = MaterialTheme.typography.labelMedium, color = SecondaryText(),
++            maxLines = 1, overflow = TextOverflow.Ellipsis)
++        Text(value, style = MaterialTheme.typography.titleLarge, color = color, maxLines = 1)
++    }
++}
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/DiagnosticsPage.kt b/android/app/src/main/java/com/sportage/obd/ui/DiagnosticsPage.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/DiagnosticsPage.kt	2026-11-07 16:35:35.202235646 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/DiagnosticsPage.kt	2026-11-07 16:44:51.896869040 +0000
+@@ -1,5 +1,6 @@
+ package com.sportage.obd.ui
+ 
++import androidx.compose.foundation.BorderStroke
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.layout.*
+ import androidx.compose.foundation.lazy.grid.GridCells
+@@ -77,7 +78,7 @@
+                         horizontalArrangement = Arrangement.spacedBy(8.dp)
+                     ) {
+                         Icon(
+-                            Icons.Default.ChatAnalytics,
++                            Icons.Default.Analytics,
+                             contentDescription = null,
+                             tint = ElectricCyan(),
+                             modifier = Modifier.size(20.dp)
+@@ -260,7 +261,7 @@
+                 verticalArrangement = Arrangement.Center
+             ) {
+                 Icon(
+-                    Icons.Default.ChatAnalytics,
++                    Icons.Default.Analytics,
+                     contentDescription = null,
+                     tint = SecondaryText(),
+                     modifier = Modifier.size(32.dp)
+@@ -287,7 +288,8 @@
+     val severityColor = when (item.severity) {
+         com.sportage.obd.obd.DtcSeverity.CRITICAL -> CriticalRed()
+         com.sportage.obd.obd.DtcSeverity.WARNING -> WarningAmber()
+-        com.sportage.obd.obd.DtcSeverity.INFO -> ElectricCyan()
++        com.sportage.obd.obd.DtcSeverity.ADVISORY -> ElectricCyan()
++        else -> ElectricCyan()
+     }
+     Surface(
+         color = DarkSurface(),
+@@ -307,9 +309,10 @@
+             ) {
+                 Icon(
+                     when (item.severity) {
+-                        com.sportage.obd.obd.DtcSeverity.CRITICAL -> Icons.Default.Error
++                        com.sportage.obd.obd.DtcSeverity.CRITICAL -> Icons.Default.Warning
+                         com.sportage.obd.obd.DtcSeverity.WARNING -> Icons.Default.Warning
+-                        com.sportage.obd.obd.DtcSeverity.INFO -> Icons.Default.Info
++                        com.sportage.obd.obd.DtcSeverity.ADVISORY -> Icons.Default.Info
++                        else -> Icons.Default.Info
+                     },
+                     contentDescription = null,
+                     tint = severityColor,
+@@ -344,7 +347,7 @@
+ 
+ @Composable
+ private fun FreezeFrameContent(
+-    freezeFrame: androidx.compose.runtime.State<com.sportage.obd.obd.FreezeFrame?>?,
++    freezeFrame: com.sportage.obd.obd.FreezeFrame?,
+     supportedPids: Set<String>,
+     connectionState: ConnectionState,
+     viewModel: ObdViewModel?,
+@@ -352,7 +355,7 @@
+     auxScanning: Boolean,
+     onAuxScanning: (Boolean) -> Unit
+ ) {
+-    val frame = freezeFrame?.value
++    val frame = freezeFrame
+     Column(
+         modifier = Modifier.fillMaxWidth(),
+         verticalArrangement = Arrangement.spacedBy(8.dp)
+@@ -375,14 +378,14 @@
+                 Surface(color = DarkSurface(), shape = RoundedCornerShape(8.dp)) {
+                     Column(modifier = Modifier.padding(10.dp)) {
+                         Text(
+-                            item.pid,
++                            item.label,
+                             color = ElectricCyan(),
+                             fontSize = 12.sp,
+                             fontWeight = FontWeight.Bold,
+                             fontFamily = FontFamily.Monospace
+                         )
+                         Text(
+-                            item.description,
++                            item.value,
+                             color = SecondaryText(),
+                             fontSize = 11.sp,
+                             fontFamily = FontFamily.SansSerif
+@@ -421,7 +424,7 @@
+ 
+ @Composable
+ private fun ReadinessContent(
+-    readiness: androidx.compose.runtime.State<com.sportage.obd.obd.ReadinessState?>?,
++    readiness: com.sportage.obd.obd.ReadinessState?,
+     supportedPids: Set<String>,
+     connectionState: ConnectionState,
+     viewModel: ObdViewModel?,
+@@ -429,7 +432,7 @@
+     auxScanning: Boolean,
+     onAuxScanning: (Boolean) -> Unit
+ ) {
+-    val state = readiness?.value
++    val state = readiness
+     Column(
+         modifier = Modifier.fillMaxWidth(),
+         verticalArrangement = Arrangement.spacedBy(8.dp)
+@@ -448,7 +451,10 @@
+                 fontSize = 12.sp,
+                 fontFamily = FontFamily.SansSerif
+             )
+-            state.monitors.forEach { (name, ready) ->
++            val allMonitors = if (state.sparkIgnitionMonitors.isNotEmpty()) state.sparkIgnitionMonitors else state.compressionIgnitionMonitors
++            allMonitors.forEach { monitor ->
++                val name = monitor.name
++                val ready = monitor.complete
+                 Surface(color = DarkSurface(), shape = RoundedCornerShape(8.dp)) {
+                     Row(
+                         modifier = Modifier
+@@ -504,7 +510,7 @@
+ 
+ @Composable
+ private fun Mode06MonitorsContent(
+-    mode06MonitorResult: androidx.compose.runtime.State<Mode06MonitorResult?>?,
++    mode06MonitorResult: Mode06MonitorResult?,
+     supportedPids: Set<String>,
+     connectionState: ConnectionState,
+     viewModel: ObdViewModel?,
+@@ -512,7 +518,7 @@
+     auxScanning: Boolean,
+     onAuxScanning: (Boolean) -> Unit
+ ) {
+-    val result = mode06MonitorResult?.value
++    val result = mode06MonitorResult
+     Column(
+         modifier = Modifier.fillMaxWidth(),
+         verticalArrangement = Arrangement.spacedBy(8.dp)
+@@ -529,8 +535,9 @@
+             color = SecondaryText(),
+             fontSize = 12.sp,
+             fontFamily = FontFamily.SansSerif
+-        )            val hasContent = result != null && (result.sparkIgnitionComponents.isNotEmpty() || result.compressionIgnitionComponents.isNotEmpty())
+-            if (hasContent) {
++        )
++        val hasContent = result != null && (result.sparkIgnitionComponents.isNotEmpty() || result.compressionIgnitionComponents.isNotEmpty())
++        if (hasContent) {
+             // Spark ignition monitors
+             if (result.sparkIgnitionComponents.isNotEmpty()) {
+                 Text(
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/MediaRadioPage.kt b/android/app/src/main/java/com/sportage/obd/ui/MediaRadioPage.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/MediaRadioPage.kt	2026-11-07 16:35:35.202485718 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/MediaRadioPage.kt	2026-11-07 16:47:16.131540220 +0000
+@@ -16,6 +16,8 @@
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.text.font.FontFamily
+ import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ import com.sportage.obd.media.MediaAppInfo
+@@ -47,9 +49,8 @@
+         Triple(107.6f, "Oryx FM", "French & Jazz")
+     )
+ 
+-    var selectedStation by remember(radioFreq) {
+-        val idx = stations.indexOfFirst { it.first == radioFreq }
+-        remember(stations, idx) { stations.getOrElse(idx) { stations.first() } }
++    val selectedStation = remember(radioFreq) {
++        stations.firstOrNull { Math.abs(it.first - radioFreq) < 0.05f } ?: stations.first()
+     }
+ 
+     Surface(
+@@ -240,7 +241,7 @@
+                     shape = RoundedCornerShape(10.dp),
+                     colors = ButtonDefaults.outlinedButtonColors(contentColor = ElectricCyan())
+                 ) {
+-                    Icon(Icons.Default.MusicAlbum, null, modifier = Modifier.size(16.dp))
++                    Icon(Icons.Default.Album, null, modifier = Modifier.size(16.dp))
+                     Spacer(Modifier.width(6.dp))
+                     Text("Open Music App", fontSize = 12.sp, fontFamily = FontFamily.SansSerif)
+                 }
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/PrivacyHtmlLoader.kt b/android/app/src/main/java/com/sportage/obd/ui/PrivacyHtmlLoader.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/PrivacyHtmlLoader.kt	2026-11-07 16:35:35.202725928 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/PrivacyHtmlLoader.kt	2026-11-07 16:47:23.857939916 +0000
+@@ -27,13 +27,7 @@
+     }
+ 
+     private fun loadFromAssets(context: android.content.Context, name: String): String {
+-        val stream = ContextCompat.openInputStream(context, "assets/$name")
+-            ?: throw IllegalStateException("Missing assets/$name")
+-        return try {
+-            stream.bufferedReader().use { it.readText() }
+-        } finally {
+-            stream.close()
+-        }
++        return context.assets.open(name).bufferedReader().use { it.readText() }
+     }
+ 
+     private fun loadFromRaw(context: android.content.Context, resName: String): String {
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/PrivacyPolicyScreen.kt b/android/app/src/main/java/com/sportage/obd/ui/PrivacyPolicyScreen.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/PrivacyPolicyScreen.kt	2026-11-07 16:35:35.202818343 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/PrivacyPolicyScreen.kt	2026-11-07 16:47:38.719718103 +0000
+@@ -1,12 +1,8 @@
+ package com.sportage.obd.ui
+ 
+ import android.content.Intent
+-import android.graphics.Bitmap
+ import android.net.Uri
+-import android.view.KeyEvent
+ import android.webkit.WebResourceRequest
+-import android.webkit.WebResourceResponse
+-import android.webkit.WebSettings
+ import android.webkit.WebView
+ import android.webkit.WebViewClient
+ import androidx.compose.foundation.layout.*
+@@ -16,11 +12,8 @@
+ import androidx.compose.runtime.*
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.platform.LocalContext
+-import androidx.compose.ui.unit.dp
+-import androidx.core.content.ContextCompat
++import androidx.compose.ui.viewinterop.AndroidView
+ import com.sportage.obd.ui.theme.*
+-import java.io.ByteArrayInputStream
+-import java.nio.charset.StandardCharsets
+ 
+ @OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+@@ -28,38 +21,14 @@
+     onNavigateBack: () -> Unit
+ ) {
+     val context = LocalContext.current
+-    val webViewClient = remember(context) {
+-        object : WebViewClient() {
+-            override fun shouldInterceptRequest(
+-                view: WebView,
+-                request: WebResourceRequest
+-            ): WebResourceResponse? {
+-                val url = request.url.toString()
+-                if (url.startsWith("file:///android_asset/") || url.startsWith("file:///android_res/raw/")) {
+-                    return null
+-                }
+-                return null
+-            }
+-
+-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+-                super.onPageStarted(view, url, favicon)
+-            }
+-
+-            override fun onPageFinished(view: WebView?, url: String?) {
+-                super.onPageFinished(view, url)
+-            }
+-        }
+-    }
+ 
+-    // Load local HTML first; fall back to the public URL only when the local asset
+-    // is unavailable (missing from the APK, or the device cannot load it).
+     val localHtml = remember(context) {
+         runCatching {
+             PrivacyHtmlLoader.loadLocalHtml(context)
+         }.getOrNull()
+     }
+ 
+-    val effectiveHtml = localHtml ?: return@remember ""
++    val effectiveHtml = localHtml ?: ""
+ 
+     Scaffold(
+         topBar = {
+@@ -80,10 +49,7 @@
+                 .padding(padding)
+         ) {
+             AndroidWebView(
+-                context = context,
+                 html = effectiveHtml,
+-                webViewClient = webViewClient,
+-                onOpenExternalLink = onOpenExternalUrl,
+                 modifier = Modifier.fillMaxSize()
+             )
+         }
+@@ -92,207 +58,34 @@
+ 
+ @Composable
+ private fun AndroidWebView(
+-    context: android.content.Context,
+     html: String,
+-    webViewClient: WebViewClient,
+-    onOpenExternalLink: (String) -> Unit,
+     modifier: Modifier = Modifier
+ ) {
+-    val webView = remember(context) {
+-        WebView(context).apply {
+-            settings.javaScriptEnabled = false
+-            settings.loadWithOverviewMode = true
+-            settings.useWideViewPort = true
+-            settings.domStorageEnabled = true
+-            settings.cacheMode = WebSettings.LOAD_DEFAULT
+-            webViewClient = this@AndroidWebView.webViewClient
+-            navigationDelegate = object : WebView.NavigationDelegate {
+-                override fun shouldStartLoad(
+-                    view: WebView,
+-                    request: WebResourceRequest
+-                ): Boolean {
+-                    val url = request.url.toString()
+-                    if (url.startsWith("http://") || url.startsWith("https://")) {
+-                        onOpenExternalUrl(url)
++    AndroidView(
++        factory = { ctx ->
++            WebView(ctx).apply {
++                settings.javaScriptEnabled = false
++                settings.loadWithOverviewMode = true
++                settings.useWideViewPort = true
++                webViewClient = object : WebViewClient() {
++                    override fun shouldOverrideUrlLoading(
++                        view: WebView?,
++                        request: WebResourceRequest?
++                    ): Boolean {
++                        val url = request?.url?.toString() ?: return false
++                        if (url.startsWith("http://") || url.startsWith("https://")) {
++                            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
++                            return true
++                        }
+                         return false
+                     }
+-                    return true
+-                }
+-
+-                override fun preloadPage(
+-                    view: WebView,
+-                    callback: WebView.PreloadPageCallback
+-                ) {
+-                    callback.preload()
+-                }
+-
+-                override fun onPageStarted(
+-                    view: WebView,
+-                    url: String?,
+-                    favicon: Bitmap?
+-                ) {
+-                    super.onPageStarted(view, url, favicon)
+-                }
+-
+-                override fun onPageFinished(
+-                    view: WebView,
+-                    url: String?
+-                ) {
+-                    super.onPageFinished(view, url)
+-                }
+-
+-                override fun onPageCommitVisible(
+-                    view: WebView,
+-                    url: String?
+-                ) {
+-                    super.onPageCommitVisible(view, url)
+-                }
+-
+-                override fun onReceivedError(
+-                    view: WebView,
+-                    errorCode: Int,
+-                    description: String?,
+-                    failingUrl: String?
+-                ) {
+-                    super.onReceivedError(view, errorCode, description, failingUrl)
+-                }
+-
+-                override fun onReceivedHttpError(
+-                    view: WebView,
+-                    request: WebResourceRequest,
+-                    errorResponse: WebResourceResponse
+-                ) {
+-                    super.onReceivedHttpError(view, request, errorResponse)
+-                }
+-
+-                override fun onReceivedSslError(
+-                    view: WebView,
+-                    handler: android.webkit.SslErrorHandler,
+-                    error: android.webkit.SslError
+-                ) {
+-                    handler.cancel()
+-                }
+-
+-                override fun onReceivedLoginRequest(
+-                    view: WebView,
+-                    handler: android.webkit.HttpAuthHandler,
+-                    host: String?,
+-                    realm: String?
+-                ) {
+-                    handler.cancel()
+-                }
+-
+-                override fun onDownloadStart(
+-                    view: WebView,
+-                    url: String?,
+-                    userAgent: String?,
+-                    contentDisposition: String?,
+-                    mimetype: String?,
+-                    contentLength: Long
+-                ) {
+-                    super.onDownloadStart(view, url, userAgent, contentDisposition, mimetype, contentLength)
+-                }
+-
+-                override fun doUpdateVisitedList(
+-                    view: WebView,
+-                    visited: Boolean
+-                ) {
+-                    super.doUpdateVisitedList(view, visited)
+-                }
+-
+-                override fun shouldInterceptRequest(
+-                    view: WebView,
+-                    request: WebResourceRequest
+-                ): WebResourceResponse? {
+-                    val url = request.url.toString()
+-                    if (url.startsWith("file:///android_asset/") || url.startsWith("file:///android_res/raw/")) {
+-                        return null
+-                    }
+-                    return null
+-                }
+-
+-                override fun onLoadResource(view: WebView?, url: String?) {
+-                    super.onLoadResource(view, url)
+-                }
+-
+-                override fun onScaleChanged(
+-                    view: WebView,
+-                    oldScale: Float,
+-                    newScale: Float
+-                ) {
+-                    super.onScaleChanged(view, oldScale, newScale)
+-                }
+-
+-                override fun onCustomViewStarted(view: WebView?) {
+-                    super.onCustomViewStarted(view)
+-                }
+-
+-                override fun onCustomViewStopped(view: WebView?) {
+-                    super.onCustomViewStopped(view)
+-                }
+-
+-                override fun onKeyShortcut(
+-                    view: WebView,
+-                    keyCode: Int,
+-                    event: KeyEvent?
+-                ): Boolean {
+-                    return super.onKeyShortcut(view, keyCode, event)
+-                }
+-
+-                override fun onSafeBrowsingHit(
+-                    view: WebView,
+-                    request: WebResourceRequest,
+-                    threatType: Int,
+-                    handler: android.webkit.SafeBrowsingResponseHandler
+-                ) {
+-                    handler.cancel()
+-                }
+-
+-                override fun onFormResubmission(
+-                    view: WebView,
+-                    info: android.webkit.FormUrlCallback
+-                ) {
+-                    info.proceed()
+-                }
+-
+-                override fun onTooManyRedirects(
+-                    view: WebView,
+-                    cancel: Boolean,
+-                    url: String?
+-                ) {
+-                    super.onTooManyRedirects(view, cancel, url)
+-                }
+-
+-                override fun onReceivedAbortedError(
+-                    view: WebView,
+-                    errorCode: Int,
+-                    description: String?,
+-                    failingUrl: String?
+-                ) {
+-                    super.onReceivedAbortedError(view, errorCode, description, failingUrl)
+-                }
+-
+-                override fun onPageStarted(
+-                    view: WebView?,
+-                    url: String?,
+-                    favicon: Bitmap?
+-                ) {
+-                    super.onPageStarted(view, url, favicon)
+-                }
+-
+-                override fun onPageFinished(
+-                    view: WebView?,
+-                    url: String?
+-                ) {
+-                    super.onPageFinished(view, url)
+                 }
++                loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+             }
+-        }
+-    }
+-
+-    AndroidView(
+-        factory = { webView },
++        },
++        update = { webView ->
++            webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
++        },
+         modifier = modifier
+     )
+ }
+-
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/QuickActionDock.kt b/android/app/src/main/java/com/sportage/obd/ui/QuickActionDock.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/QuickActionDock.kt	2026-11-07 16:35:35.202908314 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/QuickActionDock.kt	2026-11-07 16:47:49.678847661 +0000
+@@ -12,6 +12,7 @@
+ import androidx.compose.runtime.*
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.graphics.vector.ImageVector
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.text.font.FontFamily
+@@ -49,7 +50,7 @@
+             active = false
+         )
+         QuickActionChip(
+-            icon = Icons.Default.MediaPlayPause,
++            icon = Icons.Default.PlayArrow,
+             label = "Play/Pause",
+             onClick = { onMediaKey(android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) },
+             active = false
+diff -urN a/b/android/app/src/main/java/com/sportage/obd/ui/SettingsPage.kt b/android/app/src/main/java/com/sportage/obd/ui/SettingsPage.kt
+--- a/b/android/app/src/main/java/com/sportage/obd/ui/SettingsPage.kt	2026-11-07 16:35:35.203191322 +0000
++++ b/android/app/src/main/java/com/sportage/obd/ui/SettingsPage.kt	2026-11-07 16:48:21.126495504 +0000
+@@ -12,6 +12,8 @@
+ import androidx.compose.material.icons.filled.*
+ import androidx.compose.material3.*
+ import androidx.compose.runtime.*
++import androidx.compose.foundation.border
++import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.unit.dp
+@@ -161,7 +163,7 @@
+                 icon = Icons.Default.DarkMode,
+                 title = "Night Dim",
+                 subtitle = "Auto-dim the cockpit at night",
+-                onClick = onSetAutoNightDim
++                onClick = { onSetAutoNightDim(!autoNightDim) }
+             )
+ 
+             if (autoNightDim) {
+@@ -244,7 +246,7 @@
+                         Text(if (isPollingPaused) "Tap to resume" else "Tap to pause", color = SecondaryText(), fontSize = 12.sp)
+                     }
+                 }
+-                Switch(checked = isPollingPaused, onCheckedChange = onTogglePausePolling, colors = SwitchDefaults.colors(checkedTrackColor = WarningAmber()))
++                Switch(checked = isPollingPaused, onCheckedChange = { onTogglePausePolling() }, colors = SwitchDefaults.colors(checkedTrackColor = WarningAmber()))
+             }
+ 
+             Row(
+@@ -349,7 +351,7 @@
+                 TextButton(
+                     onClick = {
+                         showClearDataConfirm = false
+-                        val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
++                        val prefs = context.getSharedPreferences("sportage_obd_prefs", android.content.Context.MODE_PRIVATE)
+                         prefs.edit().clear().apply()
+                         Toast.makeText(context, "Onboarding and UI settings cleared.\n\nTrip/DTC/CSV data kept. Re-open app to see onboarding again.", Toast.LENGTH_LONG).show()
+                     },
+--- a/b/src/services/obdEngine.ts	2026-11-07 16:35:35.220995487 +0000
++++ b/src/services/obdEngine.ts	2026-11-07 16:49:16.712885596 +0000
+@@ -13,6 +13,7 @@
+   RawLogPacket,
+   DtcFault
+ } from '../types/obd';
++import { parseDtcBytes } from './obdDecoders';
+ 
+ export type TelemetryListener = (telemetry: LiveTelemetry) => void;
+ export type ConnectionListener = (state: ConnectionState, adapter?: AdapterInfo) => void;

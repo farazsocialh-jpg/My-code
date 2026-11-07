@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Restrained, light street cartography. No imagery, remote style, or dark filter. -->
+<rendertheme xmlns="http://mapsforge.org/renderTheme" version="6"
+    map-background="#F3F4F2" map-background-outside="#D6E6ED">
+    <rule e="way" k="natural" v="water">
+        <area fill="#C5DDE8" />
+    </rule>
+    <rule e="way" k="waterway" v="riverbank">
+        <area fill="#C5DDE8" />
+    </rule>
+    <rule e="way" k="landuse" v="forest|grass|meadow|recreation_ground">
+        <area fill="#DFE9DA" />
+    </rule>
+    <rule e="way" k="leisure" v="park|garden|golf_course">
+        <area fill="#DFE9DA" />
+    </rule>
+    <rule e="way" k="building" v="*" zoom-min="15">
+        <area fill="#E1E3DF" stroke="#D5D8D3" stroke-width="0.25" />
+    </rule>
+    <rule e="way" k="waterway" v="river|canal|stream">
+        <line stroke="#C5DDE8" stroke-width="1.5" />
+    </rule>
+    <rule e="way" k="highway" v="footway|path|cycleway|pedestrian" zoom-min="15">
+        <line stroke="#D5D9D3" stroke-width="0.8" />
+    </rule>
+    <rule e="way" k="highway" v="residential|unclassified|living_street|service|road" zoom-min="12">
+        <line stroke="#D4D8DA" stroke-width="3.4" />
+        <line stroke="#FFFFFF" stroke-width="2.8" />
+        <rule e="way" k="*" v="*" zoom-min="16">
+            <pathText k="name" font-family="sans_serif" font-size="10"
+                fill="#59646D" stroke="#FFFFFF" stroke-width="1.5" />
+        </rule>
+    </rule>
+    <rule e="way" k="highway" v="secondary|secondary_link|tertiary|tertiary_link">
+        <line stroke="#D1D6D9" stroke-width="4.6" />
+        <line stroke="#FFFFFF" stroke-width="3.8" />
+        <rule e="way" k="*" v="*" zoom-min="14">
+            <pathText k="name" font-family="sans_serif" font-size="11"
+                fill="#46535D" stroke="#FFFFFF" stroke-width="1.8" />
+        </rule>
+    </rule>
+    <rule e="way" k="highway" v="primary|primary_link|trunk|trunk_link|motorway|motorway_link">
+        <line stroke="#D8CBB0" stroke-width="5.4" />
+        <line stroke="#F8E6BE" stroke-width="4.5" />
+        <rule e="way" k="*" v="*" zoom-min="12">
+            <pathText k="name" font-family="sans_serif" font-size="11"
+                fill="#4E5960" stroke="#FFFFFF" stroke-width="1.8" />
+        </rule>
+    </rule>
+    <rule e="node" k="place" v="city|town" zoom-max="13">
+        <caption k="name" font-family="sans_serif" font-style="bold" font-size="14"
+            fill="#495660" stroke="#FFFFFF" stroke-width="2" />
+    </rule>
+    <rule e="node" k="place" v="suburb|neighbourhood|village" zoom-min="12" zoom-max="16">
+        <caption k="name" font-family="sans_serif" font-size="12"
+            fill="#738078" stroke="#FFFFFF" stroke-width="1.5" />
+    </rule>
+</rendertheme>
